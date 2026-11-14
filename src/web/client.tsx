@@ -151,13 +151,13 @@ function App() {
     if (pendingRef.current) void drawLatest();
   }
 
-  let waterTimer: number | undefined;
-  let waterHeld = false;
-  let waterDown = false;
+  const waterDownRef = useRef(false);
+  const waterHeldRef = useRef(false);
+  const waterTimerRef = useRef<number | undefined>(undefined);
 
-  function startWater() { if (waterDown) return; waterDown = true; waterHeld = false; waterTimer = window.setTimeout(() => { if (!waterDown) return; waterHeld = true; send({ type: 'pump', on: true }); }, 250); }
-  function stopWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); if (waterHeld) send({ type: 'pump', on: false }); else send({ type: 'pump', on: true, durationMs: pulseMs }); waterHeld = false; }
-  function cancelWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); if (waterHeld) send({ type: 'pump', on: false }); waterHeld = false; }
+  function startWater() { if (waterDownRef.current) return; waterDownRef.current = true; waterHeldRef.current = false; waterTimerRef.current = window.setTimeout(() => { if (!waterDownRef.current) return; waterHeldRef.current = true; send({ type: 'pump', on: true }); }, 250); }
+  function stopWater() { if (!waterDownRef.current) return; waterDownRef.current = false; clearTimeout(waterTimerRef.current); waterTimerRef.current = undefined; if (waterHeldRef.current) send({ type: 'pump', on: false }); else send({ type: 'pump', on: true, durationMs: pulseMs }); waterHeldRef.current = false; }
+  function cancelWater() { if (!waterDownRef.current) return; waterDownRef.current = false; clearTimeout(waterTimerRef.current); waterTimerRef.current = undefined; if (waterHeldRef.current) send({ type: 'pump', on: false }); waterHeldRef.current = false; }
 
   // Keyboard handler
   useEffect(() => {

@@ -128,6 +128,7 @@ export class TrackController {
     const token = ++this.tokens[axis];
     this.active[axis] = { dir, pct, token };
     this.pending.add(axis);
+    try { this.motion.speed(pct); } catch { /* speed is advisory */ }
     void this.motion.start(axis, dir, false).catch((error: unknown) => {
       this.error = String(error);
     }).finally(() => {
@@ -176,8 +177,6 @@ export class TrackController {
     for (const axis of ['yaw', 'pitch'] as const) {
       const goal = Math.max(-maxRate[axis], Math.min(maxRate[axis], wanted[axis]));
       this.rates[axis] = approach(this.rates[axis], goal, accel[axis] * elapsed);
-      const base = axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate;
-      if (Math.abs(this.rates[axis]) < base * this.limits.minPct / 100) this.rates[axis] = 0;
     }
     // A pressed yaw limit is a hard stop, not a deceleration ramp.
     if (yawLimit) this.rates.yaw = 0;
@@ -203,8 +202,7 @@ export class TrackController {
         continue;
       }
       const dir: 1 | -1 = rate > 0 ? 1 : -1;
-      // Manual.speed is shared by both axes, so every move uses the global bucket.
-      const pct = this.lastSpeed;
+      const pct = Math.max(this.limits.minPct, Math.min(this.limits.maxPct, Math.abs(rate) / (axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate) * 100));
       if (!live) this.begin(axis, dir, pct);
       else if (live.dir !== dir || Math.abs(live.pct - pct) >= this.limits.restartPct) this.stopAxis(axis);
     }
@@ -287,9 +285,22 @@ export async function main(): Promise<void> {
     aimY: track.tracker.aimY,
     ...track.snapshot(),
   });
-  function safeStop() { pump.stop(); track.enable(false); manual?.stop(); manual?.enable(false); if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); } }
+  function safeStop() {
+    // force-disable motors first regardless of downstream failures
+    if (axes) { try { axes.yaw.forceDisable(); } catch {} try { axes.pitch.forceDisable(); } catch {} }
+    try { pump.stop(); } catch {}
+    track.enable(false);
+    try { manual?.stop(); } catch {}
+    try { manual?.enable(false); } catch {}
+  }
   function estop() {
-    track.enable(false); manual?.estop(); if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); } pump.estop(); worker?.destroy(); void supervisor?.stop();
+    track.enable(false);
+    // force-disable motors first regardless of downstream failures
+    if (axes) { try { axes.yaw.forceDisable(); } catch {} try { axes.pitch.forceDisable(); } catch {} }
+    worker?.destroy();
+    void supervisor?.stop();
+    try { manual?.estop(); } catch {}
+    try { pump.estop(); } catch {}
     broadcast({ type: 'motorState', enabled: false, moving: false, speed: manual?.speedPct ?? 100, error: 'E-stop' });
     broadcast(trackingState());
   }
@@ -305,15 +316,15 @@ export async function main(): Promise<void> {
     switch (m.type) {
       case 'ping': ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() })); break;
       case 'offer': case 'ice': void peers.get(ws)?.signal(m).catch((e: unknown) => ws.send(JSON.stringify({ type: 'error', error: String(e) }))); break;
-      case 'estop': estop(); break;
-      case 'enable': if (typeof m.on !== 'boolean') throw Error('invalid enable'); if (!manual) throw Error('hardware unavailable'); if (!m.on) track.enable(false); manual.enable(m.on); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); broadcast(trackingState()); break;
-      case 'speed': if (typeof m.pct !== 'number' || !manual) throw Error('invalid speed'); manual.speed(m.pct); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); break;
-      case 'motor': if (!manual || !['yaw', 'pitch'].includes(m.axis) || ![-1, 1].includes(m.dir) || typeof m.on !== 'boolean') throw Error('invalid motor'); track.enable(false); if (m.on) void manual.start(m.axis, m.dir, !!m.slow).catch((e: unknown) => broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct, error: String(e) })); else manual.stop(m.axis); broadcast({ type: 'motorState', enabled: manual.enabled, moving: m.on, speed: manual.speedPct }); broadcast(trackingState()); break;
+      case 'estop': lastMotorCommand = Date.now(); estop(); break;
+      case 'enable': if (typeof m.on !== 'boolean') throw Error('invalid enable'); if (!manual) throw Error('hardware unavailable'); if (!m.on) track.enable(false); manual.enable(m.on); lastMotorCommand = Date.now(); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); broadcast(trackingState()); break;
+      case 'speed': if (typeof m.pct !== 'number' || !manual) throw Error('invalid speed'); manual.speed(m.pct); lastMotorCommand = Date.now(); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); break;
+      case 'motor': if (!manual || !['yaw', 'pitch'].includes(m.axis) || ![-1, 1].includes(m.dir) || typeof m.on !== 'boolean') throw Error('invalid motor'); track.enable(false); if (m.on) void manual.start(m.axis, m.dir, !!m.slow).catch((e: unknown) => broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct, error: String(e) })); else manual.stop(m.axis); lastMotorCommand = Date.now(); broadcast({ type: 'motorState', enabled: manual.enabled, moving: m.on, speed: manual.speedPct }); broadcast(trackingState()); break;
       case 'pump': if (typeof m.on !== 'boolean' || (m.durationMs !== undefined && typeof m.durationMs !== 'number')) throw Error('invalid pump'); if (m.on) { if (!pumpReady) throw Error('pump relay polarity is not configured'); pump.start(m.durationMs); } else pump.stop(); break;
-      case 'tracking': if (typeof m.on !== 'boolean') throw Error('invalid tracking'); if (m.on && !manual?.enabled) throw Error('enable motors first'); if (typeof m.label === 'string') track.tracker.label = m.label; if (['confidence', 'area', 'confidence + area'].includes(m.strategy)) track.tracker.strategy = m.strategy; if (typeof m.aimX === 'number' && m.aimX >= 0 && m.aimX <= 1) track.tracker.aimX = m.aimX; if (typeof m.aimY === 'number' && m.aimY >= 0 && m.aimY <= 1) track.tracker.aimY = m.aimY; track.enable(m.on); broadcast(trackingState()); break;
-      case 'aim': if (typeof m.x !== 'number' || typeof m.y !== 'number' || m.x < 0 || m.x > 1 || m.y < 0 || m.y > 1) throw Error('invalid aim'); track.tracker.aimX = m.x; track.tracker.aimY = m.y; break;
-      case 'target': if (typeof m.label !== 'string') throw Error('invalid target'); track.tracker.label = m.label; break;
-      case 'strategy': if (!['confidence', 'area', 'confidence + area'].includes(m.value)) throw Error('invalid strategy'); track.tracker.strategy = m.value; break;
+      case 'tracking': if (typeof m.on !== 'boolean') throw Error('invalid tracking'); if (m.on && !manual?.enabled) throw Error('enable motors first'); if (typeof m.label === 'string') track.tracker.label = m.label; if (['confidence', 'area', 'confidence + area'].includes(m.strategy)) track.tracker.strategy = m.strategy; if (typeof m.aimX === 'number' && m.aimX >= 0 && m.aimX <= 1) track.tracker.aimX = m.aimX; if (typeof m.aimY === 'number' && m.aimY >= 0 && m.aimY <= 1) track.tracker.aimY = m.aimY; track.enable(m.on); lastMotorCommand = Date.now(); broadcast(trackingState()); break;
+      case 'aim': if (typeof m.x !== 'number' || typeof m.y !== 'number' || m.x < 0 || m.x > 1 || m.y < 0 || m.y > 1) throw Error('invalid aim'); track.tracker.aimX = m.x; track.tracker.aimY = m.y; lastMotorCommand = Date.now(); break;
+      case 'target': if (typeof m.label !== 'string') throw Error('invalid target'); track.tracker.label = m.label; lastMotorCommand = Date.now(); break;
+      case 'strategy': if (!['confidence', 'area', 'confidence + area'].includes(m.value)) throw Error('invalid strategy'); track.tracker.strategy = m.value; lastMotorCommand = Date.now(); break;
       case 'classes': classIds = normalizeClassIds(m.ids); sendClasses(worker); broadcast({ type: 'classState', ids: classIds }); break;
       default: throw Error(`unknown control type ${m.type}`);
     }
@@ -362,12 +373,20 @@ export async function main(): Promise<void> {
   ipc.listen(cfg.socket);
   supervisor?.start();
 
+  let lastMotorCommand = 0;
+  const MOTION_TIMEOUT_MS = 5_000;
   let lastTrackBroadcast = 0;
   let lastTrackError: string | undefined;
   const trackingTimer = setInterval(() => {
     if (!track.enabled) return;
     const snapshot = track.tick();
     const now = Date.now();
+    // stop motion if no motor command arrived for MOTION_TIMEOUT_MS
+    if (manual && snapshot.active && now - lastMotorCommand > MOTION_TIMEOUT_MS) {
+      manual.stop();
+      broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct, error: 'Motion timeout' });
+      broadcast(trackingState());
+    }
     if (clients.size && now - lastTrackBroadcast >= TRACK_LIMITS.broadcastMs) {
       lastTrackBroadcast = now;
       broadcast(trackingState());
@@ -394,7 +413,17 @@ export async function main(): Promise<void> {
     websocket: {
       open(ws) { clients.add(ws); try { peers.set(ws, new VideoPeer(m => ws.send(JSON.stringify(m)), process.env.KITTI_STUN)); } catch (e) { console.warn('WebRTC unavailable:', e); } state(ws); if (latestDetection) ws.send(JSON.stringify({ type: 'detections', ...latestDetection })); },
       message(ws, m) { try { route(ws, String(m)); } catch (e) { ws.send(JSON.stringify({ type: 'error', error: String(e) })); } },
-      close(ws) { clients.delete(ws); peers.get(ws)?.close(); peers.delete(ws); if (clients.size === 0) safeStop(); },
+      close(ws) {
+        clients.delete(ws);
+        peers.get(ws)?.close();
+        peers.delete(ws);
+        if (clients.size === 0) { safeStop(); return; }
+        // stop motion when any client disconnects — the remaining observer may re-enable
+        track.enable(false);
+        manual?.stop();
+        broadcast({ type: 'motorState', enabled: manual?.enabled ?? false, moving: false, speed: manual?.speedPct ?? 100 });
+        broadcast(trackingState());
+      },
     },
   });
   console.log(`KITTI ${server.url}`);

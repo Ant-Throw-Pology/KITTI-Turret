@@ -41,6 +41,7 @@ test('fresh off-centre target starts a bounded, ramp-limited yaw move', () => {
   expect(first.paused).toBeNull();
   expect(first.yaw).toBeGreaterThan(0);
   expect(first.speedPct).toBe(TRACK_LIMITS.minPct);
+  expect(motion.speedPct).toBe(first.speedPct);
   expect(motion.starts).toEqual([{ axis: 'yaw', dir: 1, slow: false }]);
   const second = controller.tick(1_100);
   expect(second.speedPct).toBeGreaterThan(first.speedPct);
