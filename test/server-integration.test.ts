@@ -569,15 +569,15 @@ test('motor commands return hardware unavailable when no YAW switch is configure
 
     // Send enable — should fail with hardware unavailable (no manual)
     ws.send(JSON.stringify({ type: 'enable', on: true }));
-    const enableErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'hardware unavailable'), 'enable hardware unavailable');
+    const enableErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'Error: hardware unavailable'), 'enable hardware unavailable');
     expect(enableErr).toBeTruthy();
 
     // Send motor command — should also fail with hardware unavailable, not invalid motor
     ws.send(JSON.stringify({ type: 'motor', axis: 'yaw', dir: 1, on: true }));
-    const motorErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'hardware unavailable'), 'motor hardware unavailable');
+    const motorErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'Error: hardware unavailable'), 'motor hardware unavailable');
     expect(motorErr).toBeTruthy();
     // Confirm it is NOT "invalid motor"
-    expect(client.messages.filter(m => m.type === 'error').every(m => m.error === 'hardware unavailable')).toBe(true);
+    expect(client.messages.filter(m => m.type === 'error').every(m => m.error === 'Error: hardware unavailable')).toBe(true);
   } finally {
     ws?.close();
     server.kill('SIGTERM');
