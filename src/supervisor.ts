@@ -11,6 +11,8 @@ export interface WorkerSupervisorOptions {
   startupMs?: number;
   restartMs?: number;
   checkMs?: number;
+  termMs?: number;
+  stopMs?: number;
   killGroup?: (pid: number, signal: NodeJS.Signals) => void;
   onEvent?: (event: string, detail?: unknown) => void;
 }
@@ -23,6 +25,8 @@ export class WorkerSupervisor {
   private restartTimer?: ReturnType<typeof setTimeout>;
   private generation = 0;
   private stopping = false;
+  private latched = false;
+  private stopPromise?: Promise<void>;
   private startedAt = 0;
   private lastFrameAt = 0;
   private readonly now: () => number;
@@ -30,6 +34,8 @@ export class WorkerSupervisor {
   private readonly startupMs: number;
   private readonly restartMs: number;
   private readonly checkMs: number;
+  private readonly termMs: number;
+  private readonly stopMs: number;
   private readonly killGroup: (pid: number, signal: NodeJS.Signals) => void;
 
   constructor(private readonly options: WorkerSupervisorOptions) {
@@ -38,11 +44,14 @@ export class WorkerSupervisor {
     this.startupMs = options.startupMs ?? 15_000;
     this.restartMs = options.restartMs ?? 1_000;
     this.checkMs = options.checkMs ?? 1_000;
+    this.termMs = options.termMs ?? 2_000;
+    this.stopMs = options.stopMs ?? 2_500;
     this.killGroup = options.killGroup ?? ((pid, signal) => process.kill(-pid, signal));
   }
 
   start(): void {
-    if (this.process || this.restartTimer) return;
+    if (this.stopPromise || this.latched) return;
+    if (this.process || this.terminating || this.restartTimer) return;
     this.stopping = false;
     this.spawn();
     this.timer ??= setInterval(() => this.check(), this.checkMs);
@@ -58,17 +67,17 @@ export class WorkerSupervisor {
     this.startedAt = this.now();
     this.lastFrameAt = 0;
     this.options.onEvent?.('spawn', { pid: child.pid });
-    void child.exited.then(code => {
+    const settle = (event: string, detail: unknown) => {
       if (this.process === child) this.process = undefined;
       if (this.terminating === child) this.terminating = undefined;
-      this.options.onEvent?.('exit', { pid: child.pid, code });
+      this.latched = false;
+      this.options.onEvent?.(event, detail);
       if (!this.stopping && generation === this.generation) this.scheduleRestart();
-    }, error => {
-      if (this.process === child) this.process = undefined;
-      if (this.terminating === child) this.terminating = undefined;
-      this.options.onEvent?.('error', error);
-      if (!this.stopping && generation === this.generation) this.scheduleRestart();
-    });
+    };
+    void child.exited.then(
+      code => settle('exit', { pid: child.pid, code }),
+      error => settle('error', error),
+    );
   }
 
   private scheduleRestart(): void {
@@ -89,33 +98,58 @@ export class WorkerSupervisor {
     this.terminate(child);
   }
 
+  private signal(child: ManagedProcess, signal: NodeJS.Signals): void {
+    try { this.killGroup(child.pid, signal); }
+    catch { try { child.kill(signal); } catch { /* already exited or group gone */ } }
+  }
+
   private terminate(child: ManagedProcess): void {
     if (this.terminating === child) return;
     this.terminating = child;
-    try { this.killGroup(child.pid, 'SIGTERM'); }
-    catch { try { child.kill('SIGTERM'); } catch { /* already exited */ } }
-    const generation = this.generation;
+    this.signal(child, 'SIGTERM');
+    let exited = false;
     const escalation = setTimeout(() => {
-      if (this.process !== child || this.generation !== generation) return;
-      try { this.killGroup(child.pid, 'SIGKILL'); }
-      catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
-    }, 2_000);
-    void child.exited.finally(() => clearTimeout(escalation));
+      if (exited || this.terminating !== child) return;
+      this.signal(child, 'SIGKILL');
+    }, this.termMs);
+    const clear = () => { exited = true; clearTimeout(escalation); };
+    void child.exited.then(clear, clear);
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
     this.generation++;
     if (this.timer) clearInterval(this.timer);
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.timer = undefined;
     this.restartTimer = undefined;
-    const child = this.process;
-    if (!child) return;
+
+    const child = this.process ?? this.terminating;
+    if (!child) {
+      this.stopPromise = Promise.resolve().then(() => { this.stopPromise = undefined; });
+      return this.stopPromise;
+    }
+
     this.terminate(child);
-    await Promise.race([child.exited.catch(() => -1), Bun.sleep(2_500)]);
-    if (this.process === child) this.process = undefined;
-    if (this.terminating === child) this.terminating = undefined;
+    let settled = false;
+    const onExit = () => { settled = true; };
+    void child.exited.then(onExit, onExit);
+    const waitMs = Math.max(this.stopMs, this.termMs + 100);
+    this.stopPromise = Promise.race([
+      child.exited.then(() => undefined, () => undefined),
+      Bun.sleep(waitMs),
+    ]).then(() => {
+      if (settled) {
+        if (this.process === child) this.process = undefined;
+        if (this.terminating === child) this.terminating = undefined;
+        this.latched = false;
+      } else {
+        this.latched = true;
+      }
+      this.stopPromise = undefined;
+    });
+    return this.stopPromise;
   }
 
   get pid(): number | undefined { return this.process?.pid; }

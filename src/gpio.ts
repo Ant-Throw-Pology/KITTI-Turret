@@ -26,7 +26,7 @@ export class MockGpio implements DigitalIo {
   close() { this.modes.clear(); this.values.clear(); }
 }
 // libgpiod v2 opaque objects; constants from gpiod.h: INPUT=2 OUTPUT=3, PULL_UP=4.
-const P=FFIType.ptr, I=FFIType.int, V=FFIType.void, U=FFIType.u32;
+const P=FFIType.ptr, I=FFIType.int, V=FFIType.void, U=FFIType.u32, Z=FFIType.u64;
 const symbols={
  gpiod_chip_open:{args:[P],returns:P},gpiod_chip_close:{args:[P],returns:V},
  gpiod_line_settings_new:{args:[],returns:P},gpiod_line_settings_free:{args:[P],returns:V},
@@ -34,7 +34,7 @@ const symbols={
  gpiod_line_settings_set_bias:{args:[P,I],returns:I},
  gpiod_line_settings_set_output_value:{args:[P,I],returns:I},
  gpiod_line_config_new:{args:[],returns:P},gpiod_line_config_free:{args:[P],returns:V},
- gpiod_line_config_add_line_settings:{args:[P,P,U,P],returns:I},
+ gpiod_line_config_add_line_settings:{args:[P,P,Z,P],returns:I},
  gpiod_chip_request_lines:{args:[P,P,P],returns:P},
  gpiod_line_request_release:{args:[P],returns:V},
  gpiod_line_request_set_value:{args:[P,U,I],returns:I},

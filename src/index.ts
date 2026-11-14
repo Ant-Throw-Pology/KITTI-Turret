@@ -21,7 +21,8 @@ const broadcast = (v: unknown) => { for (const c of clients) c.send(JSON.stringi
 const pump = new Pump(io && cfg.relayActiveHigh !== null ? new GpioRelay(io, 'GPIO1_C6', cfg.relayActiveHigh) : new MockRelay(),
   {minPulseMs:50,maxPulseMs:2000,maxContinuousMs:cfg.maxPumpMs}, (on,remainingMs,error)=>broadcast({type:'pumpState',on,remainingMs,error}));
 const axes = io ? {yaw:new Stepper(io,MOTOR_PINS.yaw),pitch:new Stepper(io,MOTOR_PINS.pitch)} : null;
-if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); }
+function forceDisableAxes() { if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); } }
+forceDisableAxes();
 const manual = io && axes && cfg.yawNegativeSwitch ? new Manual(axes,pump,io,
   {negative:cfg.yawNegativeSwitch as 'GPIO1_B6'|'GPIO1_B7',positive:cfg.yawNegativeSwitch === 'GPIO1_B6'?'GPIO1_B7':'GPIO1_B6',graceSteps:64,backoffSteps:128,backoffRate:960,maxBackoffSteps:2400}) : null;
 const tracker = new Tracker();
@@ -32,8 +33,8 @@ const supervisor = cfg.model && process.env.KITTI_EXTERNAL_WORKER !== '1' ? new 
  spawn: () => Bun.spawn([process.execPath, workerEntry], {detached:true,stdin:'ignore',stdout:'ignore',stderr:'inherit',env:process.env}),
  onEvent: (event, detail) => console.log(`worker ${event}`, detail ?? ''),
 }) : null;
-function safeStop() { pump.stop(); tracker.enabled=false; manual?.stop(); manual?.enable(false); }
-function estop() { manual?.estop(); pump.estop(); tracker.enabled=false;void supervisor?.stop();broadcast({type:'motorState',enabled:false,moving:false,speed:manual?.speedPct??100,error:'E-stop'}); }
+function safeStop() { pump.stop(); tracker.enabled=false; manual?.stop(); manual?.enable(false); forceDisableAxes(); }
+function estop() { manual?.estop(); forceDisableAxes(); pump.estop(); tracker.enabled=false;void supervisor?.stop();broadcast({type:'motorState',enabled:false,moving:false,speed:manual?.speedPct??100,error:'E-stop'}); }
 function state(ws:any) { ws.send(JSON.stringify({type:'motorState',enabled:manual?.enabled??false,moving:false,speed:manual?.speedPct??100})); ws.send(JSON.stringify({type:'pumpState',on:pump.on,remainingMs:pump.remainingMs,error:pump.error})); }
 function route(ws:any,raw:string) {
  const m=JSON.parse(raw); if (!m || typeof m.type !== 'string') throw Error('invalid message');
@@ -71,5 +72,5 @@ const server=Bun.serve({hostname:cfg.host,port:cfg.port,
 });
 console.log(`KITTI ${server.url}`);
 let shuttingDown=false;
-async function shutdown(){if(shuttingDown)return;shuttingDown=true;safeStop();manual?.shutdown();pump.close();io?.close();for(const p of peers.values())p.close();worker?.destroy();await supervisor?.stop();ipc.close();server.stop(true);if(existsSync(cfg.socket))unlinkSync(cfg.socket)}
+async function shutdown(){if(shuttingDown)return;shuttingDown=true;safeStop();manual?.shutdown();forceDisableAxes();pump.close();io?.close();for(const p of peers.values())p.close();worker?.destroy();await supervisor?.stop();ipc.close();server.stop(true);if(existsSync(cfg.socket))unlinkSync(cfg.socket)}
 process.once('SIGINT',()=>void shutdown());process.once('SIGTERM',()=>void shutdown());

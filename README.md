@@ -37,13 +37,13 @@ bun dist/index.js
 bun dist/worker.js
 ```
 
-The server currently does not supervise the worker. Do not rely on this run mode for a physical turret.
+The server supervises a worker when `KITTI_MODEL` is set. Do not rely on this run mode for a physical turret until the remaining stop-ship findings are resolved.
 
 ## Configuration
 
 `KITTI_HOST` (default `127.0.0.1`), `KITTI_PORT` (8080), `KITTI_SOCKET` (`/tmp/kitti-turret.sock`), `KITTI_MODEL` (required for worker), `KITTI_CAMERA` (`auto`), `KITTI_WIDTH` (640), `KITTI_HEIGHT` (480), `KITTI_FPS` (20), `KITTI_JPEG_QUALITY` (60), `KITTI_RELAY_ACTIVE_HIGH` (unset until measured), `KITTI_YAW_NEGATIVE_SWITCH` (unset until measured), `KITTI_MAX_PUMP_MS` (10000), `KITTI_PULSE_MS` (500), `KITTI_MAX_STEPS` (57600), `KITTI_STUN` (optional), `KITTI_MOCK=1` (tests only).
 
-The server refuses motor and pump commands without a configured switch mapping and relay polarity. E-stop uses `POST /estop` and the WebSocket `estop` command. This path still needs timing verification on the Pi.
+The server refuses motor commands without a configured switch mapping and refuses pump commands without relay polarity. Pump availability does not depend on the yaw switch mapping. E-stop uses `POST /estop` and the WebSocket `estop` command. This path still needs timing verification on the Pi.
 
 ## Deploy
 

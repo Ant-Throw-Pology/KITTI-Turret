@@ -22,6 +22,18 @@ test('frame window drops oldest queued and detects stale ack', () => {
   window.ack(1); window.ack(2);
   expect(window.stalled(30001)).toBe(false);
 });
+test('tracking box contract uses width and height for the center and area', () => {
+  const tracker = new Tracker(); tracker.enabled = true; tracker.label = 'cat';
+  const box = { label: 'cat', confidence: 0.9, x: 400, y: 300, width: 80, height: 100 };
+  expect(tracker.update([box], 640, 480, 10, false)).toEqual({ yaw: 300, pitch: 220 });
+  const boxes = [
+    { label: 'cat', confidence: 0.99, x: 0, y: 0, width: 10, height: 10 },
+    { label: 'cat', confidence: 0.10, x: 0, y: 0, width: 100, height: 100 },
+    { label: 'cat', confidence: 0.90, x: 0, y: 0, width: 0, height: 100 },
+  ];
+  expect(chooseTarget(boxes, 'cat', 'area')?.width).toBe(100);
+  expect(chooseTarget([boxes[2]!], 'cat', 'confidence')).toBeNull();
+});
 test('tracking ignores stale boxes and limit prevents yaw', () => {
   const tracker = new Tracker(); tracker.enabled = true; tracker.label = 'cat';
   const box = { label: 'cat', confidence: 0.9, x: 400, y: 200, width: 80, height: 80 };
