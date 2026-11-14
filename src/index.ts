@@ -562,8 +562,8 @@ export async function main(): Promise<void> {
         });
         break;
       case "motor":
+        if (!manual) throw Error("hardware unavailable");
         if (
-          !manual ||
           !["yaw", "pitch"].includes(m.axis) ||
           ![-1, 1].includes(m.dir) ||
           typeof m.on !== "boolean"

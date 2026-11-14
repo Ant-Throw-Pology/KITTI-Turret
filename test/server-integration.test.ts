@@ -472,3 +472,60 @@ test('control-link watchdog closes silent client after PING_TIMEOUT_MS and trigg
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test('motor commands return hardware unavailable when no YAW switch is configured', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kitti-motor-'));
+  const socketPath = join(dir, 'turret.sock');
+  const port = await freePort();
+  const env = {
+    ...process.env,
+    KITTI_MOCK: '1',
+    KITTI_HOST: '127.0.0.1',
+    KITTI_PORT: String(port),
+    KITTI_SOCKET: socketPath,
+    KITTI_EXTERNAL_WORKER: '1',
+    KITTI_MODEL: '',
+  };
+  // Note: no KITTI_YAW_NEGATIVE_SWITCH — manual will not be created
+  const server = Bun.spawn([process.execPath, join(root, 'src', 'index.ts')], {
+    cwd: root, env, stdout: 'pipe', stderr: 'pipe',
+  });
+  let ws: WebSocket | undefined;
+  try {
+    let url = '';
+    const reader = server.stdout.getReader();
+    const decoder = new TextDecoder();
+    let output = '';
+    while (!url) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server exited: ${output}`);
+      output += decoder.decode(value, { stream: true });
+      const match = /KITTI (http:\/\/\S+)/.exec(output);
+      if (match) url = match[1]!;
+    }
+    reader.releaseLock();
+
+    const wsUrl = new URL('/ws', url);
+    wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const client = await openSocket(wsUrl.href);
+    ws = client.socket;
+
+    // Send enable — should fail with hardware unavailable (no manual)
+    ws.send(JSON.stringify({ type: 'enable', on: true }));
+    const enableErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'Error: hardware unavailable'), 'enable hardware unavailable');
+    expect(enableErr).toBeTruthy();
+
+    // Send motor command — should also fail with hardware unavailable, not invalid motor
+    ws.send(JSON.stringify({ type: 'motor', axis: 'yaw', dir: 1, on: true }));
+    const motorErr = await until(() => client.messages.find(m => m.type === 'error' && m.error === 'Error: hardware unavailable'), 'motor hardware unavailable');
+    expect(motorErr).toBeTruthy();
+    // Confirm it is NOT "invalid motor"
+    expect(client.messages.filter(m => m.type === 'error').every(m => m.error === 'Error: hardware unavailable')).toBe(true);
+  } finally {
+    ws?.close();
+    server.kill('SIGTERM');
+    const exited = await Promise.race([server.exited, Bun.sleep(4_000).then(() => -1)]);
+    if (exited === -1) server.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
