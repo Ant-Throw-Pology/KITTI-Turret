@@ -1,15 +1,17 @@
 type Signal = { type: string; sdp?: string; candidate?: string; mid?: string };
+type RtcModule = { PeerConnection: new (name: string, config: { iceServers: string[] }) => any };
 
 export class VideoPeer {
   private pc: any;
   private dc: any;
   private ready: Promise<void>;
   private closed = false;
-  constructor(private readonly sendSignal: (message: Signal) => void, private readonly stun = '') {
-    this.ready = this.initialize();
+  private unavailable?: unknown;
+  constructor(private readonly sendSignal: (message: Signal) => void, private readonly stun = '', private readonly loadRtc: () => Promise<RtcModule> = () => import('node-datachannel') as Promise<RtcModule>) {
+    this.ready = this.initialize().catch((error: unknown) => { this.unavailable = error; });
   }
   private async initialize(): Promise<void> {
-    const rtc = await import('node-datachannel');
+    const rtc = await this.loadRtc();
     if (this.closed) return;
     this.pc = new rtc.PeerConnection('kitti-video', { iceServers: this.stun ? [this.stun] : [] });
     this.pc.onLocalDescription((sdp: string, type: string) => this.sendSignal({ type: type.toLowerCase(), sdp }));
@@ -22,6 +24,7 @@ export class VideoPeer {
   }
   async signal(message: Signal): Promise<void> {
     await this.ready;
+    if (this.unavailable) throw new Error(`WebRTC unavailable: ${String(this.unavailable)}`);
     if (this.closed || !this.pc) return;
     if (message.type === 'offer' && message.sdp) this.pc.setRemoteDescription(message.sdp, 'Offer');
     else if (message.type === 'ice' && message.candidate && message.mid !== undefined) this.pc.addRemoteCandidate(message.candidate, message.mid);
