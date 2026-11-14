@@ -508,7 +508,8 @@ test('Origin validation rejects cross-origin requests on /ws and /estop', async 
     expect(res.status).toBe(200);
 
     // /estop POST with matching same-origin — allowed
-    res = await fetch(new URL('/estop', url), { method: 'POST', headers: { Origin: url } });
+    const hostOrigin = url.replace(/\/?$/, '');
+    res = await fetch(new URL('/estop', url), { method: 'POST', headers: { Origin: hostOrigin } });
     expect(res.status).toBe(200);
 
     // /estop POST with cross-origin — rejected 403
