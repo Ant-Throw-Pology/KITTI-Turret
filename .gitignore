@@ -1,3 +1,6 @@
+# Backboard agent data
+.backboard
+
 # dependencies (bun install)
 node_modules
 
