@@ -7,6 +7,23 @@ export const RKNN_FP16_OUTPUT_BYTES = 84 * 8400 * 2;
 export const RKNN_TENSOR_UINT8 = 3;
 export const RKNN_TENSOR_NHWC = 1;
 
+/* INT8 six-output layout: 3 strides × 2 tensors (box FP16 + score float32). */
+export const RKNN_INT8_STRIDE_CELLS = [80 * 80, 40 * 40, 20 * 20] as const; // 6400, 1600, 400
+/* Offset into the flat boxes array (64 channels × cumulative cells). */
+export function rknnInt8BoxOffset(strideIndex: number): number {
+  let offset = 0;
+  for (let s = 0; s < strideIndex; s++) offset += 64 * RKNN_INT8_STRIDE_CELLS[s]!;
+  return offset;
+}
+export const RKNN_INT8_TOTAL_BOX_WORDS = 64 * (80 * 80 + 40 * 40 + 20 * 20); // 64 × 8400
+
+/** Detect output layout: FP16 (1 output of known size) or INT8 (6 outputs). */
+export function detectRknnLayout(outputSizes: number[]): "fp16" | "int8" {
+  if (outputSizes.length === 1 && outputSizes[0] === RKNN_FP16_OUTPUT_BYTES) return "fp16";
+  if (outputSizes.length === 6) return "int8";
+  throw new Error(`unrecognized RKNN output layout: ${outputSizes.length} outputs`);
+}
+
 export function packRknnInput(rgb: Uint8Array): Uint8Array {
   const input = new Uint8Array(RKNN_INPUT_SIZE), view = new DataView(input.buffer);
   view.setBigUint64(8, BigInt(ptr(rgb)), true);

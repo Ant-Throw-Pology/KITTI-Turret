@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { letterbox } from "../src/preprocess";
-import { decodeFp16, fp16Table, nms } from "../src/yolo";
+import { decodeFp16, decodeInt8, fp16Table, nms } from "../src/yolo";
+import type { Int8StrideInput } from "../src/yolo";
 import { buildTagFramePacket, grayscale } from "../src/tag_worker";
 import { NpuLock, packRknnInput, readRknnOutput, RKNN_FP16_OUTPUT_BYTES, RKNN_INPUT_SIZE, RKNN_OUTPUT_SIZE, RKNN_TENSOR_NHWC, RKNN_TENSOR_UINT8 } from "../src/rknn";
 import { APRILTAG_CLASS_ID_OFFSET, apriltagClassId, parseTagResultLine } from "../src/apriltag";
-import { existsSync } from "node:fs";
+import { existsSync } from "node:fs");
 
 test("letterbox swaps BGR and centers aspect ratio", () => {
   const image = letterbox(new Uint8Array([1, 2, 3, 4, 5, 6]), 2, 1, 4);
@@ -67,4 +68,31 @@ test("NPU lock rejects a second owner and releases", () => {
   try { first.acquire(); expect(() => second.acquire()).toThrow(/live PID/); }
   finally { first.release(); }
   expect(existsSync(path)).toBe(false);
+});
+test("INT8 six-output decoder returns nothing for all background", () => {
+  const cells = 20 * 20;
+  const box = new Float32Array(64 * cells);
+  const score = new Float32Array(80 * cells);
+  score.fill(-10); box.fill(0);
+  const meta = letterbox(new Uint8Array(640 * 480 * 3), 640, 480);
+  const result = decodeInt8([{ cells, box, score }, { cells: 40 * 40, box: new Float32Array(64 * 40 * 40), score: new Float32Array(80 * 40 * 40) }, { cells: 80 * 80, box: new Float32Array(64 * 80 * 80), score: new Float32Array(80 * 80 * 80) }], meta, new Set([0]));
+  expect(result).toHaveLength(0);
+});
+test("INT8 six-output decoder finds a detection from a single stride", () => {
+  const gw = 640 / 32, gh = 640 / 32, cells = gh * gw;
+  const box = new Float32Array(64 * cells);
+  const score = new Float32Array(80 * cells);
+  score.fill(-10); box.fill(0);
+  const cellIdx = 10 * gw + 10;
+  // Set box channels 0-3 at the chosen cell
+  box[cellIdx] = 100;          // cx
+  box[cells + cellIdx] = 110;  // cy
+  box[2 * cells + cellIdx] = 20;  // w
+  box[3 * cells + cellIdx] = 30;  // h
+  score[0 * cells + cellIdx] = 0.95;  // class 0 score
+  const meta = letterbox(new Uint8Array(640 * 480 * 3), 640, 480);
+  const result = decodeInt8([{ cells, box, score }, { cells: 0, box: new Float32Array(0), score: new Float32Array(0) }, { cells: 0, box: new Float32Array(0), score: new Float32Array(0) }], meta, new Set([0, 1]));
+  expect(result.length).toBeGreaterThanOrEqual(1);
+  expect(result[0]!.classId).toBe(0);
+  expect(result[0]!.confidence).toBe(0.95);
 });
