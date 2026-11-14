@@ -68,7 +68,7 @@ function App() {
 
   // WebSocket connection
   useEffect(() => {
-    ws.onopen = () => { connectPeer(); send({ type: 'ping' }); };
+    ws.onopen = () => { void connectPeer(); send({ type: 'ping' }); };
     ws.onclose = () => { stopMotion(); cancelWater(); peerRef.current?.close(); setError('Connection lost'); };
     ws.onmessage = (event) => {
       let msg: any;
@@ -93,9 +93,9 @@ function App() {
       } else if (msg.type === 'error') {
         setError(msg.error ?? msg.message);
       } else if (msg.type === 'answer' && peerRef.current) {
-        peerRef.current.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        void peerRef.current.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(e => setError(String(e)));
       } else if (msg.type === 'ice' && peerRef.current) {
-        peerRef.current.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.mid });
+        void peerRef.current.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.mid }).catch(e => setError(String(e)));
       }
     };
     const ping = setInterval(() => send({ type: 'ping' }), 5000);
@@ -111,21 +111,30 @@ function App() {
   // WebRTC setup
   async function connectPeer() {
     peerRef.current?.close();
-    const pc = new RTCPeerConnection({ iceServers: [] });
-    const dc = pc.createDataChannel('video');
-    dc.binaryType = 'arraybuffer';
-    dc.onmessage = (event) => {
-      pendingRef.current = event.data as ArrayBuffer;
-      if (!decodingRef.current) void drawLatest();
-    };
-    pc.onicecandidate = (event) => {
-      if (event.candidate) send({ type: 'ice', candidate: event.candidate.candidate, mid: event.candidate.sdpMid });
-    };
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    send({ type: 'offer', sdp: offer.sdp });
-    peerRef.current = pc;
-    channelRef.current = dc;
+    peerRef.current = null;
+    channelRef.current = null;
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      peerRef.current = pc;
+      const dc = pc.createDataChannel('video');
+      channelRef.current = dc;
+      dc.binaryType = 'arraybuffer';
+      dc.onmessage = (event) => {
+        pendingRef.current = event.data as ArrayBuffer;
+        if (!decodingRef.current) void drawLatest();
+      };
+      pc.onicecandidate = (event) => {
+        if (event.candidate) send({ type: 'ice', candidate: event.candidate.candidate, mid: event.candidate.sdpMid });
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      if (peerRef.current === pc) send({ type: 'offer', sdp: offer.sdp });
+    } catch (e) {
+      peerRef.current?.close();
+      peerRef.current = null;
+      channelRef.current = null;
+      setError(`WebRTC unavailable: ${String(e)}`);
+    }
   }
 
   async function drawLatest() {
@@ -164,8 +173,8 @@ function App() {
     const onkeydown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       const key = e.key.toLowerCase();
-      if (key === 'shift') { shiftRef.current = true; emitHeld(); return; }
       if (e.repeat) return;
+      if (key === 'shift') { shiftRef.current = true; emitHeld(); return; }
       if (KEY_MAP[key]) { e.preventDefault(); startMotion(KEY_MAP[key]); }
       else if (key === 'f') { e.preventDefault(); startWater(); }
       else if (key === 'e') send({ type: 'enable', on: !enabled });

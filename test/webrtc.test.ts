@@ -61,3 +61,10 @@ test('VideoPeer sends prefixed JPEG payloads over the video data channel with qu
   expect(peer.sendFrame(bytes)).toBe(false);
   peer.close();
 });
+
+test('VideoPeer contains native module load failures until signaling is requested', async () => {
+  const peer = new VideoPeer(() => {}, '', async () => { throw new Error('native addon missing'); });
+  expect(peer.sendFrame(new Uint8Array([1, 2, 3]))).toBe(false);
+  await expect(peer.signal({ type: 'offer', sdp: 'offer-sdp' })).rejects.toThrow('WebRTC unavailable: Error: native addon missing');
+  peer.close();
+});
