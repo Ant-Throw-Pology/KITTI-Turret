@@ -86,6 +86,41 @@ test('estop force-disables untouched drivers and pump', () => {
   expect(relay.on).toBe(false);
 });
 
+test('estop attempts every axis force-disable even if one fails', () => {
+  const io = new MockGpio();
+  class ThrowingStepper extends Stepper { override forceDisable() { super.forceDisable(); throw new Error('disable failed'); } }
+  const yaw = new ThrowingStepper(io, MOTOR_PINS.yaw);
+  const pitch = new Stepper(io, MOTOR_PINS.pitch);
+  const manual = new Manual({ yaw, pitch }, new Pump(new MockRelay()), io);
+  manual.enable(true);
+  manual.estop();
+  expect(io.values.get(MOTOR_PINS.yaw.en)).toBe(true);
+  expect(io.values.get(MOTOR_PINS.pitch.en)).toBe(true);
+  expect(manual.enabled).toBe(false);
+});
+
+test('yaw backoff stops if the opposite limit activates mid-move', async () => {
+  const io = new MockGpio();
+  class LimitStepper extends Stepper {
+    calls = 0;
+    override async move(dir: 1 | -1, steps: number, _rate: number, shouldStop?: () => boolean): Promise<number> {
+      this.calls++;
+      if (this.calls === 1) { this.position += dir; io.setInput('GPIO1_B7', true); return 1; }
+      io.setInput('GPIO1_B6', true);
+      if (shouldStop?.()) return 0;
+      this.position += dir * steps;
+      return steps;
+    }
+  }
+  const yaw = new LimitStepper(io, MOTOR_PINS.yaw);
+  const pitch = new Stepper(io, MOTOR_PINS.pitch);
+  const manual = new Manual({ yaw, pitch }, new Pump(new MockRelay()), io, { negative: 'GPIO1_B6', positive: 'GPIO1_B7', graceSteps: 0, backoffSteps: 8, backoffRate: 960, maxBackoffSteps: 8 });
+  manual.enable(true);
+  await manual.start('yaw', 1);
+  expect(yaw.calls).toBe(2);
+  expect(yaw.position).toBe(1);
+});
+
 test('manual shutdown leaves shared GPIO open for pump final off', () => {
   const io = new MockGpio();
   const relay = new MockRelay();

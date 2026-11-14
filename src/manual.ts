@@ -41,12 +41,12 @@ export class Manual {
     const now=this.switches();
     const hit=now[blocking]&&!atStart?.[blocking];
     // do not back off into an already-pressed opposite limit
-    if(hit&&!now[opposite]){const n=Math.min(this.limits.backoffSteps,this.limits.maxBackoffSteps);await motor.move(dir===1?-1:1,n,this.limits.backoffRate);}
+    if(hit&&!now[opposite]){const n=Math.min(this.limits.backoffSteps,this.limits.maxBackoffSteps);await motor.move(dir===1?-1:1,n,this.limits.backoffRate,()=>this.switches()[opposite]);}
    }
   })();
   this.running.set(axis,task);try{await task;}finally{if(this.running.get(axis)===task)this.running.delete(axis);}
  }
- estop(){this.estopped=true;try{this.stop();}catch{}try{this.pump.estop();}catch{}for(const a of Object.values(this.axes))a.forceDisable();this.enabled=false;}
+ estop(){this.estopped=true;try{this.stop();}catch{}try{this.pump.estop();}catch{}for(const a of Object.values(this.axes))try{a.forceDisable();}catch{}this.enabled=false;}
  resetEstop(){this.estopped=false;this.pump.resetEstop();}
  shutdown(){this.estop();}
 }
