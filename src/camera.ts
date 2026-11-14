@@ -26,11 +26,19 @@ export class Camera {
   private async open(device: string): Promise<void> {
     const { width, height, fps } = this.options;
     if (width < 1 || height < 1 || fps < 1) throw new Error("invalid camera dimensions or fps");
-    const proc = Bun.spawn([this.options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-vf", `crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',scale=${width}:${height},fps=${fps}`, "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"], { stdout: "pipe", stderr: "inherit", stdin: "ignore", detached: true });
+    const proc = Bun.spawn([this.options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-vf", `crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',scale=${width}:${height},fps=${fps}`, "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"], { stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
     this.proc = proc;
     const stream = proc.stdout;
     if (!stream || typeof stream === "number") throw new Error("capture stdout unavailable");
+    void this.drainStderr(proc.stderr);
     void this.readLoop(stream, width, height);
+  }
+  private async drainStderr(stderr: ReadableStream<Uint8Array> | number | null): Promise<void> {
+    if (!stderr || typeof stderr === "number") return;
+    const reader = stderr.getReader();
+    try { while (true) { const { done } = await reader.read(); if (done) break; } }
+    catch { /* stderr closed */ }
+    finally { try { reader.releaseLock(); } catch { /* already released */ } }
   }
   private async readLoop(stream: ReadableStream<Uint8Array>, width: number, height: number): Promise<void> {
     const reader = stream.getReader(), frameSize = width * height * 3;
