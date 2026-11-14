@@ -1,23 +1,24 @@
-# Local test report — 2026-11-14
+# Verification report — 2026-11-14
 
-Environment: x86_64 development sandbox, Bun 1.4.4. No Orange Pi, camera, NPU, GPIO, relay, motors, or browser attached.
+Development machine: x86_64, Bun 1.4.4. Target: Orange Pi 5, aarch64, Bun 1.4.4, reached through `ssh -F /dev/null antthrowpology@10.67.0.1`.
 
 | Command | Observed result |
 | --- | --- |
-| `bun test` | 14 passed, 1 skipped, 0 failed; 31 assertions, 96 ms total at first run. |
-| `bun run build` | Passed after dependencies became available: three Bun entrypoints and the browser client bundled. |
-| `bun run typecheck` | `bun check` runs but reports 33 source errors in `src/gpio.ts`, `src/rknn.ts`, and `src/index.ts`; the two errors in this test file were fixed. |
-| `KITTI_TEST_SOCKET=1 bun test test/soak.test.ts` | One pass, one fail: Unix listener creation returns `EPERM`. Python `socket.AF_UNIX.bind` independently returns `PermissionError: [Errno 1] Operation not permitted`. |
-| `KITTI_MOCK=1 KITTI_RELAY_ACTIVE_HIGH=1 KITTI_YAW_NEGATIVE_SWITCH=GPIO1_B6 bun dist/index.js` | Exits with `EPERM` for both the Unix IPC listener and `Bun.serve` TCP listen. HTTP/WebSocket runtime smoke is blocked by this environment. |
+| `bun install` | Completed; `bun.lock` committed. |
+| `bun check` | No type errors in 27 files. |
+| `bun run build` | Bundled server, worker, tag helper, and browser client. |
+| `bun test` | 14 pass, 1 skipped by default. |
+| `KITTI_TEST_SOCKET=1 bun test test/soak.test.ts` | 2 pass. 5,000 frames offered through a Unix socket; 4 ACKed, 4,996 dropped as designed, maximum 2 in flight, approximately 12 ms, 16 MB RSS change during the short test. |
+| Built server smoke | `/` and `/dist/client.js`: HTTP 200. WebSocket ping received pong. After correcting `VideoPeer.close()`, the WebSocket round trip and Ctrl+C shutdown both completed without an error. |
 
-The in-memory ACK-window stress test offered 100,000 one-byte frames in 21 ms, dropped 99,996 queued frames, and observed at most two in flight. This verifies the bounded data structure only; it is not a network, process, or hour-long soak. The Unix socket test is marked skipped by default and can be run on a host allowing socket creation with `KITTI_TEST_SOCKET=1 bun test test/soak.test.ts`.
+The in-memory ACK window test offered 100,000 frames in about 14 ms, dropped 99,996, and kept at most two in flight. This is a short queue test, not a one-hour soak.
 
-Pump timing: the fake relay timeout unit test completed, but no timing error distribution was measured. Hardware pump timing, relay polarity, e-stop response time, process cleanup, WebRTC, image alignment, FPS, latency, memory stability, and NPU stalls remain unverified.
+## Read-only Orange Pi observations
 
-Blockers: socket binding is denied by the runtime sandbox, the existing `.git` directory is read-only, GitHub API access is unavailable, and no Pi is connected. No hardware result should be inferred from the local tests.
-# Pi access attempt, 2026-11-14
+- `uname -m`: `aarch64`; `bun --version`: `1.4.4`.
+- `/usr/lib/librknnrt.so` exists (7,259,064 bytes). `/lib/aarch64-linux-gnu/libgpiod.so.3` exists and resolves to `libgpiod.so.3.1.1`. `libgpiod-dev` headers are not installed. `libapriltag-dev` 3.4.2-1+b2 and the shared library are installed.
+- The login user belongs to `gpio` and `video` groups. `/dev/gpiochip0` through `5` exist.
+- `/dev/video0` produced one 640×480 BGR frame (921,600 bytes) with ffmpeg. `/dev/video1` produced no frame and failed `VIDIOC_G_INPUT`.
+- These observations did not run the application worker, NPU, WebRTC, GPIO outputs, or pump.
 
-`ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=5 antthrowpology@10.67.0.1 ...` failed before connecting: `socket: Operation not permitted`. The sandbox disallows outbound sockets, so no Pi observation was made. The initial SSH attempt without `-F /dev/null` was also blocked by permissions on the host SSH config. Hardware gates remain unverified.
-
-The project typecheck command is now `bun check`. It still reports missing Bun types because dependency installation is blocked in this sandbox.
-
+Pump pulse timing, relay polarity, switch mapping, e-stop response time, motor pulse count, browser video/overlay alignment, FPS, latency, memory stability, NPU stalls, and a one-hour soak remain unverified. No actuation was attempted.

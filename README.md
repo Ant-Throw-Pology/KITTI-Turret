@@ -1,6 +1,6 @@
 # KITTI Turret
 
-Status: **development, not safe for physical deployment**. The local mock tests pass; target hardware, WebRTC, and sustained runtime remain unverified. See `docs/REVIEW.md` and `docs/TEST_REPORT.md` for open failures. Do not connect a pump or motors to the current server until the stop-ship items are resolved.
+Status: **development, not safe for physical deployment**. The local build and mock tests pass; GPIO outputs, WebRTC in a browser, and sustained runtime remain unverified. See `docs/REVIEW.md` and `docs/TEST_REPORT.md` for open failures. Do not connect a pump or motors to the current server until the stop-ship items are resolved.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ bun test
 bun run build
 ```
 
-The current sandbox cannot complete `bun install`: package registry access is denied. Therefore `bun.lock` was not generated and a clean-checkout build has **not** passed. `bun check` is the typecheck command, but it requires installed type packages. `bun test` runs pure/mock tests. The browser bundle alone builds with `bun build src/web/client.tsx --target=browser --outdir=/tmp/kitti-web-build`.
+`bun.lock` is committed. `bun install`, `bun check`, `bun test`, and `bun run build` pass on the development machine. `KITTI_TEST_SOCKET=1 bun test test/soak.test.ts` runs the Unix socket test. The built server served `/` and `/dist/client.js` and replied to a WebSocket ping locally. Pi runtime and browser WebRTC remain unverified.
 
 To run after installing dependencies, set `KITTI_MODEL` to a supplied RKNN model path and start the server and worker separately:
 
@@ -47,7 +47,7 @@ The server refuses motor and pump commands without a configured switch mapping a
 
 ## Deploy
 
-`deploy/build.sh` runs install, typecheck, tests, and build, then copies the tag C shim and web assets. `deploy/deploy.sh user@host [--run]` syncs `dist/` over SSH; `--run` uses `ssh -tt`. `deploy/turret.service` specifies `Restart=on-failure` and `KillMode=control-group`. Deployment is blocked until the build gate and stop-ship safety issues are resolved.
+`deploy/build.sh` runs install, typecheck, tests, and build, then copies the tag C shim and web assets. `deploy/deploy.sh user@host [--run]` syncs `dist/` over SSH; `--run` uses `ssh -tt`. `deploy/turret.service` specifies `Restart=on-failure` and `KillMode=control-group`. Deployment is blocked by the stop-ship safety issues and Pi native dependency installation.
 
 ## Pi hardware checklist
 
