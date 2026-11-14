@@ -3,6 +3,7 @@ export type Config = {
   width: number; height: number; fps: number; jpegQuality: number;
   relayActiveHigh: boolean | null; yawNegativeSwitch: string | null;
   maxPumpMs: number; pulseMs: number; maxSteps: number;
+  trustedOrigin: string;
 };
 
 const number = (name: string, fallback: number, min: number, max: number) => {
@@ -25,6 +26,7 @@ export function loadConfig(): Config {
     yawNegativeSwitch: process.env.KITTI_YAW_NEGATIVE_SWITCH ?? null,
     maxPumpMs: number('KITTI_MAX_PUMP_MS', 10000, 50, 60000),
     pulseMs: number('KITTI_PULSE_MS', 500, 50, 2000),
-    maxSteps: number('KITTI_MAX_STEPS', 57600, 1, 1000000)
+    maxSteps: number('KITTI_MAX_STEPS', 57600, 1, 1000000),
+    trustedOrigin: process.env.KITTI_TRUSTED_ORIGIN ?? ''
   };
 }

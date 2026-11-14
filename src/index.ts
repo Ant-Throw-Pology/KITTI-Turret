@@ -405,8 +405,10 @@ export async function main(): Promise<void> {
     hostname: cfg.host, port: cfg.port,
     fetch(req, s) {
       const path = new URL(req.url).pathname;
-      if (path === '/ws') return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
-      if (path === '/estop' && req.method === 'POST') { estop(); return new Response('ok'); }
+      const origin = req.headers.get('origin');
+      const trusted = origin === null || origin === 'null' || origin === 'http://localhost' || origin.startsWith('http://127.') || origin === 'http://[::1]' || origin.startsWith(cfg.trustedOrigin);
+      if (path === '/ws') { if (!trusted) return new Response('forbidden', { status: 403 }); return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 }); }
+      if (path === '/estop' && req.method === 'POST') { if (!trusted) return new Response('forbidden', { status: 403 }); estop(); return new Response('ok'); }
       if (path === '/') return new Response(Bun.file(indexHtmlPath), { headers: { 'content-type': 'text/html' } });
       if (path === '/dist/client.js') return new Response(Bun.file(clientJsPath), { headers: { 'content-type': 'text/javascript;charset=utf-8' } });
       if (path === '/dist/style.css') return new Response(Bun.file(styleCssPath), { headers: { 'content-type': 'text/css;charset=utf-8' } });
