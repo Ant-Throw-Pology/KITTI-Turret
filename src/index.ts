@@ -318,14 +318,25 @@ function isLoopbackOrigin(origin: string): boolean {
   return false;
 }
 
+/** Checks if a Host header refers to a loopback address (with optional port). */
+function isLoopbackHost(host: string): boolean {
+  const colon = host.indexOf(':');
+  const h = colon >= 0 ? host.slice(0, colon) : host;
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+}
+
 function checkOrigin(
   req: Request,
   cfg: { checkOrigin: boolean; trustedOrigin: string },
 ): boolean {
   if (!cfg.checkOrigin) return true;
   const origin = req.headers.get("Origin");
-  // No Origin or null Origin: allow (non-browser CLI, privacy contexts)
-  if (!origin || origin === "null") return true;
+  // No Origin or null Origin: allow only for loopback Host requests
+  // (non-browser CLI on the same machine), reject for remote requests.
+  if (!origin || origin === "null") {
+    const host = req.headers.get("Host") ?? '';
+    return isLoopbackHost(host);
+  }
   // Loopback origins: always allowed
   if (isLoopbackOrigin(origin)) return true;
   // Configurable trusted origin: exact match only
