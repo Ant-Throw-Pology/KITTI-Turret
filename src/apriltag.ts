@@ -1,5 +1,37 @@
-import { grayscale } from "./tag_worker";
+import { buildTagFramePacket } from "./tag_worker";
 import type { Detection } from "./yolo";
+
+export const APRILTAG_CLASS_ID_OFFSET = 1000;
+
+export function apriltagClassId(tagId: number): number {
+  if (!Number.isInteger(tagId) || tagId < 0) throw new Error("invalid AprilTag id");
+  return APRILTAG_CLASS_ID_OFFSET + tagId;
+}
+
+function finite(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value); }
+
+export function parseTagResultLine(line: string): { sequence: number; boxes: Detection[] } | undefined {
+  const parsed = JSON.parse(line) as { sequence?: unknown; boxes?: unknown };
+  if (!Number.isSafeInteger(parsed.sequence) || (parsed.sequence as number) < 0 || !Array.isArray(parsed.boxes)) return undefined;
+  const boxes: Detection[] = [];
+  for (const box of parsed.boxes) {
+    if (!box || typeof box !== "object") return undefined;
+    const candidate = box as Record<string, unknown>;
+    if (typeof candidate.label !== "string" || !Number.isInteger(candidate.classId) || (candidate.classId as number) < APRILTAG_CLASS_ID_OFFSET) return undefined;
+    if (![candidate.confidence, candidate.x, candidate.y, candidate.width, candidate.height].every(finite)) return undefined;
+    if ((candidate.width as number) <= 0 || (candidate.height as number) <= 0) return undefined;
+    boxes.push({
+      label: candidate.label,
+      classId: candidate.classId as number,
+      confidence: candidate.confidence as number,
+      x: candidate.x as number,
+      y: candidate.y as number,
+      width: candidate.width as number,
+      height: candidate.height as number,
+    });
+  }
+  return { sequence: parsed.sequence as number, boxes };
+}
 
 export class TagHelper {
   private child?: ReturnType<typeof Bun.spawn>;
@@ -22,7 +54,7 @@ export class TagHelper {
       let end: number;
       while ((end = this.line.indexOf("\n")) >= 0) {
         const line = this.line.slice(0, end); this.line = this.line.slice(end + 1);
-        try { const parsed = JSON.parse(line) as { sequence: number; boxes: Detection[] }; if (parsed.sequence === this.pendingSequence) this.boxes = parsed.boxes; }
+        try { const parsed = parseTagResultLine(line); if (parsed?.sequence === this.pendingSequence) this.boxes = parsed.boxes; }
         catch (error) { console.warn("tag result rejected", error); }
         this.busy = false;
       }
@@ -31,9 +63,7 @@ export class TagHelper {
   }
   submit(sequence: number, bgr: Uint8Array, width: number, height: number): void {
     if (this.busy || !this.child?.stdin || typeof this.child.stdin === "number") return;
-    const gray = grayscale(bgr, width, height), packet = new Uint8Array(12 + gray.length);
-    const view = new DataView(packet.buffer);
-    view.setUint32(0, sequence, true); view.setUint32(4, width, true); view.setUint32(8, height, true); packet.set(gray, 12);
+    const packet = buildTagFramePacket(sequence, bgr, width, height);
     this.busy = true; this.pendingSequence = sequence;
     try { this.child.stdin.write(packet); this.child.stdin.flush(); }
     catch (error) { this.busy = false; console.warn("tag helper write failed", error); }
