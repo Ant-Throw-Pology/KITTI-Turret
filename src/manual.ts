@@ -18,7 +18,7 @@ export class Manual {
  stop(axis?:Axis){for(const [name,m] of Object.entries(this.axes) as [Axis,Stepper][])if(!axis||axis===name){this.generation[name]++;m.cancel();}}
  async start(axis:Axis,dir:1|-1,slow=false){
   if(!this.enabled||this.estopped)throw new Error('Motor disabled');
-  if(this.running.has(axis)){this.stop(axis);await this.running.get(axis);}
+  if(this.running.has(axis)){this.stop(axis);const gen=this.generation[axis];await this.running.get(axis);if(this.generation[axis]!==gen)return;}
   const id=++this.generation[axis];
   const motor=this.axes[axis];
   const base=axis==='yaw'?1920:1280;
@@ -38,13 +38,15 @@ export class Manual {
     moved+=n;if(n===0)break;
    }
    if(axis==='yaw'&&id===this.generation[axis]&&this.enabled&&!this.estopped){
-    const hit=this.switches()[blocking]&&!atStart?.[blocking];
-    if(hit){const n=Math.min(this.limits.backoffSteps,this.limits.maxBackoffSteps);await motor.move(dir===1?-1:1,n,this.limits.backoffRate);}
+    const now=this.switches();
+    const hit=now[blocking]&&!atStart?.[blocking];
+    // do not back off into an already-pressed opposite limit
+    if(hit&&!now[opposite]){const n=Math.min(this.limits.backoffSteps,this.limits.maxBackoffSteps);await motor.move(dir===1?-1:1,n,this.limits.backoffRate);}
    }
   })();
   this.running.set(axis,task);try{await task;}finally{if(this.running.get(axis)===task)this.running.delete(axis);}
  }
- estop(){this.estopped=true;this.stop();this.pump.estop();for(const a of Object.values(this.axes))a.forceDisable();this.enabled=false;}
+ estop(){this.estopped=true;try{this.stop();}catch{}try{this.pump.estop();}catch{}for(const a of Object.values(this.axes))a.forceDisable();this.enabled=false;}
  resetEstop(){this.estopped=false;this.pump.resetEstop();}
  shutdown(){this.estop();}
 }

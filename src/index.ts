@@ -128,6 +128,7 @@ export class TrackController {
     const token = ++this.tokens[axis];
     this.active[axis] = { dir, pct, token };
     this.pending.add(axis);
+    try { this.motion.speed(pct); } catch { /* speed is advisory */ }
     void this.motion.start(axis, dir, false).catch((error: unknown) => {
       this.error = String(error);
     }).finally(() => {
@@ -176,8 +177,6 @@ export class TrackController {
     for (const axis of ['yaw', 'pitch'] as const) {
       const goal = Math.max(-maxRate[axis], Math.min(maxRate[axis], wanted[axis]));
       this.rates[axis] = approach(this.rates[axis], goal, accel[axis] * elapsed);
-      const base = axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate;
-      if (Math.abs(this.rates[axis]) < base * this.limits.minPct / 100) this.rates[axis] = 0;
     }
     // A pressed yaw limit is a hard stop, not a deceleration ramp.
     if (yawLimit) this.rates.yaw = 0;
@@ -287,9 +286,22 @@ export async function main(): Promise<void> {
     aimY: track.tracker.aimY,
     ...track.snapshot(),
   });
-  function safeStop() { pump.stop(); track.enable(false); manual?.stop(); manual?.enable(false); if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); } }
+  function safeStop() {
+    // force-disable motors first regardless of downstream failures
+    if (axes) { try { axes.yaw.forceDisable(); } catch {} try { axes.pitch.forceDisable(); } catch {} }
+    try { pump.stop(); } catch {}
+    track.enable(false);
+    try { manual?.stop(); } catch {}
+    try { manual?.enable(false); } catch {}
+  }
   function estop() {
-    track.enable(false); manual?.estop(); if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); } pump.estop(); worker?.destroy(); void supervisor?.stop();
+    track.enable(false);
+    // force-disable motors first regardless of downstream failures
+    if (axes) { try { axes.yaw.forceDisable(); } catch {} try { axes.pitch.forceDisable(); } catch {} }
+    worker?.destroy();
+    void supervisor?.stop();
+    try { manual?.estop(); } catch {}
+    try { pump.estop(); } catch {}
     broadcast({ type: 'motorState', enabled: false, moving: false, speed: manual?.speedPct ?? 100, error: 'E-stop' });
     broadcast(trackingState());
   }
