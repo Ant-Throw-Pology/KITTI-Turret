@@ -720,7 +720,7 @@ export async function main(): Promise<void> {
       });
     });
   });
-  ipc.listen(cfg.socket);
+  await new Promise<void>((resolve) => ipc.listen(cfg.socket, resolve));
   supervisor?.start();
 
   let lastTrackBroadcast = 0;
