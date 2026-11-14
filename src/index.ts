@@ -246,7 +246,7 @@ export async function main(): Promise<void> {
   const pumpReady = mockMode || cfg.relayActiveHigh !== null;
   const clients = new Set<any>();
   const peers = new Map<any, VideoPeer>();
-  const broadcast = (v: unknown) => { for (const c of clients) c.send(JSON.stringify(v)); };
+  const broadcast = (v: unknown) => { const json = JSON.stringify(v); for (const c of clients) { try { c.send(json); } catch { clients.delete(c); } } };
   const pump = new Pump(io && cfg.relayActiveHigh !== null ? new GpioRelay(io, 'GPIO1_C6', cfg.relayActiveHigh) : new MockRelay(),
     { minPulseMs: 50, maxPulseMs: 2000, maxContinuousMs: cfg.maxPumpMs },
     (on, remainingMs, error) => broadcast({ type: 'pumpState', on, remainingMs, error }));
