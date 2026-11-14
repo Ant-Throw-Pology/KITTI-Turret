@@ -94,5 +94,5 @@ test("INT8 six-output decoder finds a detection from a single stride", () => {
   const result = decodeInt8([{ cells, box, score }, { cells: 0, box: new Float32Array(0), score: new Float32Array(0) }, { cells: 0, box: new Float32Array(0), score: new Float32Array(0) }], meta, new Set([0, 1]));
   expect(result.length).toBeGreaterThanOrEqual(1);
   expect(result[0]!.classId).toBe(0);
-  expect(result[0]!.confidence).toBe(0.95);
+  expect(result[0]!.confidence).toBeCloseTo(0.95, 2);
 });

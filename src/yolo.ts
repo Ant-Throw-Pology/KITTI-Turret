@@ -52,7 +52,7 @@ export function decodeInt8(
       let best = -1, bestScore = confidence;
       for (const id of classIds) {
         if (!Number.isInteger(id) || id < 0 || id >= 80) continue;
-        const p = 1 / (1 + Math.exp(-score[id * cells + idx]!));
+        const p = score[id * cells + idx]!;
         if (p > bestScore) { bestScore = p; best = id; }
       }
       if (best < 0) continue;
