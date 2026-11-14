@@ -5,6 +5,8 @@ export type Config = {
   yawInvert: boolean; pitchInvert: boolean;
   maxPumpMs: number; pulseMs: number; maxSteps: number;
   pingTimeoutMs: number;
+  checkOrigin: boolean;
+  trustedOrigin: string;
 };
 
 const number = (name: string, fallback: number, min: number, max: number) => {
@@ -40,5 +42,7 @@ export function loadConfig(): Config {
     pulseMs: number('KITTI_PULSE_MS', 500, 50, 2000),
     maxSteps: number('KITTI_MAX_STEPS', 57600, 1, 1000000),
     pingTimeoutMs: number('KITTI_PING_TIMEOUT_MS', 15000, 1000, 120000),
+    checkOrigin: process.env.KITTI_CHECK_ORIGIN !== '0',
+    trustedOrigin: process.env.KITTI_TRUSTED_ORIGIN ?? '',
   };
 }

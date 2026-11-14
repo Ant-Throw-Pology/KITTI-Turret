@@ -304,6 +304,35 @@ export function normalizeClassIds(ids: unknown): number[] {
   return [...normalized].sort((a, b) => a - b);
 }
 
+/** Loopback origin patterns for exact string comparison (no URL parsing). */
+const LOOPBACK_ORIGINS = [
+  "http://localhost",
+  "http://127.0.0.1",
+  "http://[::1]",
+];
+
+function isLoopbackOrigin(origin: string): boolean {
+  for (const prefix of LOOPBACK_ORIGINS) {
+    if (origin === prefix || origin.startsWith(prefix + ":")) return true;
+  }
+  return false;
+}
+
+function checkOrigin(
+  req: Request,
+  cfg: { checkOrigin: boolean; trustedOrigin: string },
+): boolean {
+  if (!cfg.checkOrigin) return true;
+  const origin = req.headers.get("Origin");
+  // No Origin or null Origin: allow (non-browser CLI, privacy contexts)
+  if (!origin || origin === "null") return true;
+  // Loopback origins: always allowed
+  if (isLoopbackOrigin(origin)) return true;
+  // Configurable trusted origin: exact match only
+  if (cfg.trustedOrigin && origin === cfg.trustedOrigin) return true;
+  return false;
+}
+
 function liveSocket(path: string): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new Socket();
@@ -754,11 +783,16 @@ export async function main(): Promise<void> {
     port: cfg.port,
     fetch(req, s) {
       const path = new URL(req.url).pathname;
-      if (path === "/ws")
+      if (path === "/ws") {
+        if (!checkOrigin(req, cfg))
+          return new Response("forbidden", { status: 403 });
         return s.upgrade(req)
           ? undefined
           : new Response("upgrade failed", { status: 400 });
+      }
       if (path === "/estop" && req.method === "POST") {
+        if (!checkOrigin(req, cfg))
+          return new Response("forbidden", { status: 403 });
         estop();
         return new Response("ok");
       }
