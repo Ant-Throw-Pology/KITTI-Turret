@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun src/index.ts",
+    "start": "cd dist && bun index.js",
     "typecheck": "bun check",
     "test": "bun test",
     "build": "rm -rf dist && bun build src/index.ts src/worker.ts --target=bun --production --outdir dist --external node-datachannel",

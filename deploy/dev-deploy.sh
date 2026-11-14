@@ -44,7 +44,5 @@ echo "◆ compile apriltag tag-helper (optional)"
 ssh "${host}" 'cd ~/kitti-turret/dist && cc -O2 apriltag_ffi.c -lapriltag -o tag-helper 2>/dev/null && echo "  tag-helper built" || echo "  tag-helper skipped (apriltag library not available on target)"'
 
 # ── Run server via SSH with forced TTY ────────────────────────────────────────────
-# Ctrl+C propagates through ssh -tt; the exec chain replaces the shell so SIGINT
-# reaches bun directly.  turret.env is never synced; it is read from the target.
 echo "◆ starting server on ${host} (Ctrl+C to stop)"
-exec ssh -tt "${host}" 'cd ~/kitti-turret && if [ -f ./turret.env ]; then set -a; . ./turret.env; set +a; fi; : "${KITTI_HOST:=0.0.0.0}"; export KITTI_HOST; exec bun dist/index.js'
+exec ssh -tt "${host}" 'cd ~/kitti-turret && if [ -f ./turret.env ]; then set -a; . ./turret.env; set +a; fi; : "${KITTI_HOST:=0.0.0.0}"; export KITTI_HOST; cd dist && exec bun index.js'
