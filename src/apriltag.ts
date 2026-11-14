@@ -10,9 +10,10 @@ export class TagHelper {
   constructor(private executable = "dist/tag-helper") {}
   start(): boolean {
     try {
-      this.child = Bun.spawn([this.executable], { stdin: "pipe", stdout: "pipe", stderr: "inherit", detached: true });
-      if (!this.child.stdout || typeof this.child.stdout === "number") throw new Error("tag stdout unavailable");
-      void this.read(this.child.stdout);
+      const child = Bun.spawn([this.executable], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+      if (!child.stdout || typeof child.stdout === "number") { child.kill(); throw new Error("tag stdout unavailable"); }
+      this.child = child;
+      void this.read(child.stdout);
       return true;
     } catch (error) { console.warn("tag detections disabled:", error); return false; }
   }
@@ -39,5 +40,5 @@ export class TagHelper {
     catch (error) { this.busy = false; console.warn("tag helper write failed", error); }
   }
   latest(): readonly Detection[] { return this.boxes; }
-  stop(): void { if (this.child) { try { process.kill(-this.child.pid, "SIGTERM"); } catch { this.child.kill(); } this.child = undefined; } }
+  stop(): void { if (this.child) { try { this.child.kill("SIGTERM"); } catch { /* process already exited */ } this.child = undefined; } }
 }

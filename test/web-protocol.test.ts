@@ -47,10 +47,53 @@ test('client source keeps required UI interaction guards wired', () => {
   const source = readFileSync('src/web/client.tsx', 'utf8');
   expect(source).toContain("if (e.repeat) return");
   expect(source).toContain("key === 'shift'");
-  expect(source).toContain('window.onblur');
+  expect(source).toContain("addEventListener('blur'");
   expect(source).toContain('stopMotion(); cancelWater(); send({ type: ');
-  expect(source).toContain("send({ type: 'pump', on: true, durationMs: pulseMs })");
+  expect(source).toContain("send({ type: 'pump', on: true, durationMs: action.durationMs })");
   expect(source).toContain("send({ type: 'pump', on: false })");
+});
+
+test('reconnect: connectWebSocket, cleanupWs, bounded backoff, null-safe send', () => {
+  const source = readFileSync('src/web/client.tsx', 'utf8');
+  expect(source).toContain('let ws: WebSocket | null = null');
+  expect(source).toContain('function connectWebSocket(');
+  expect(source).toContain('function cleanupWs()');
+  expect(source).toContain('const WS_MAX_RECONNECT = 20');
+  expect(source).toContain('ws?.readyState === WebSocket.OPEN');
+  // Exponential backoff: Math.min(30000, Math.pow(2, wsReconnectAttempts) * 100)
+  expect(source).toContain('Math.pow(2, wsReconnectAttempts) * 100');
+  // Lifecycle cleanup on disconnect
+  expect(source).toContain('cleanupWs(); stopMotion(); send({ type: \'pump\', on: false }); peerRef.current?.close()');
+  // On reconnect: re-establish WebRTC signaling
+  expect(source).toContain('connectPeer().catch((e) => setError(String(e))); send({ type: \'ping\' })');
+});
+
+test('stable keyboard: empty deps, refs for enabled/pulseMs, blur listener', () => {
+  const source = readFileSync('src/web/client.tsx', 'utf8');
+  // Keyboard handler reads enabled via ref, not closed-over state
+  expect(source).toContain("enabledRef.current");
+  // Water stop uses pulseMsRef instead of closed-over pulseMs
+  expect(source).toContain("pulseMsRef.current");
+  // The keyboard useEffect has empty deps so it installs once
+  expect(source).toContain("useEffect(() => {");
+  expect(source).toContain("  }, []);");
+  // Blur is registered/unregistered via addEventListener/removeEventListener
+  expect(source).toContain("window.addEventListener('blur', onBlur)");
+  expect(source).toContain("window.removeEventListener('blur', onBlur)");
+  // Input-focus exclusion preserved
+  expect(source).toContain("e.target instanceof HTMLInputElement");
+  // Repeat suppression preserved
+  expect(source).toContain("if (e.repeat) return");
+  // Shift resend preserved
+  expect(source).toContain("key === 'shift'");
+  // F tap/hold preserved
+  expect(source).toContain("key === 'f'");
+});
+
+test('missing peer handling in signaling route returns clear error', () => {
+  const source = readFileSync('src/index.ts', 'utf8');
+  expect(source).toContain('const peer = peers.get(ws);');
+  expect(source).toContain('"WebRTC peer not initialized"');
 });
 
 test('client source echoes sliders only from explicit server fields', () => {

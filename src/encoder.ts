@@ -187,10 +187,6 @@ export class JpegEncoder {
   }
 
   private killProc(proc: EncoderProcess): void {
-    try {
-      (proc as unknown as { pid: number }).pid ?? 0;
-      try { process.kill(-(proc as unknown as { pid: number }).pid, "SIGKILL"); return; } catch { /* not detached or group gone */ }
-    } catch { /* pid not available */ }
     try { proc.kill("SIGKILL"); } catch { /* already exited */ }
   }
 

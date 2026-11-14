@@ -6,4 +6,3 @@ bun run typecheck
 bun test
 bun run build
 cp src/apriltag_ffi.c dist/
-cp src/web/index.html src/web/style.css dist/

@@ -7,14 +7,14 @@ class FakeMotion implements TrackMotion {
   enabled = true;
   estopped = false;
   speedPct = 0;
-  readonly starts: { axis: Axis; dir: 1 | -1; slow?: boolean }[] = [];
+  readonly starts: { axis: Axis; dir: 1 | -1; slow?: boolean; overridePct?: number }[] = [];
   readonly stops: Axis[] = [];
   switchesValue = { negative: false, positive: false };
   private resolve = new Map<Axis, () => void>();
 
   speed(pct: number): void { this.speedPct = pct; }
-  start(axis: Axis, dir: 1 | -1, slow?: boolean): Promise<void> {
-    this.starts.push({ axis, dir, slow });
+  start(axis: Axis, dir: 1 | -1, slow?: boolean, overridePct?: number): Promise<void> {
+    this.starts.push({ axis, dir, slow, overridePct });
     return new Promise<void>(resolve => this.resolve.set(axis, resolve));
   }
   stop(axis?: Axis): void {
@@ -41,7 +41,7 @@ test('fresh off-centre target starts a bounded, ramp-limited yaw move', () => {
   expect(first.paused).toBeNull();
   expect(first.yaw).toBeGreaterThan(0);
   expect(first.speedPct).toBe(TRACK_LIMITS.minPct);
-  expect(motion.starts).toEqual([{ axis: 'yaw', dir: 1, slow: false }]);
+  expect(motion.starts).toEqual([{ axis: 'yaw', dir: 1, slow: false, overridePct: 10 }]);
   const second = controller.tick(1_100);
   expect(second.speedPct).toBeGreaterThan(first.speedPct);
   expect(second.speedPct).toBeLessThanOrEqual(TRACK_LIMITS.maxPct);
@@ -126,6 +126,66 @@ test('speed changes never exceed the configured acceleration window', () => {
     previous = snapshot.speedPct;
   }
   expect(previous).toBeLessThanOrEqual(TRACK_LIMITS.maxPct);
+  controller.enable(false);
+});
+
+test('sub-minimum acceleration accumulates across ticks and starts only when threshold is crossed', () => {
+  const motion = new FakeMotion();
+  const controller = new TrackController(motion);
+  controller.tracker.label = 'cat';
+  controller.enable(true);
+  // Place target just barely off-centre so velocity is small
+  controller.sample(sample([cat(325)], 1_000), 1_000);
+  controller.tick(1_000);
+  // First tick: rate just starts accumulating below minPct
+  const first = controller.tick(1_050);
+  expect(first.active).toBe(false); // not started yet
+  // Force a bigger offset to make the tracker request a higher velocity
+  controller.sample(sample([cat(480)], 1_050), 1_050);
+  let cumulative = 0;
+  for (let step = 0; step < 20; step++) {
+    const snap = controller.tick(1_050 + (step + 1) * 50);
+    if (snap.active) { cumulative = snap.speedPct; break; }
+  }
+  // Must eventually cross minPct and start
+  expect(cumulative).toBeGreaterThanOrEqual(TRACK_LIMITS.minPct);
+  expect(motion.starts.length).toBeGreaterThanOrEqual(1);
+  controller.enable(false);
+});
+
+test('tracking passes its own overridePct not shared speedPct', () => {
+  const motion = new FakeMotion();
+  const controller = new TrackController(motion);
+  controller.tracker.label = 'cat';
+  controller.enable(true);
+  controller.sample(sample([cat(580)], 1_000), 1_000);
+  controller.tick(1_000);
+  const snap = controller.tick(1_050);
+  expect(snap.active).toBe(true);
+  // The overridePct should be passed to start, bounded by maxPct
+  const start = motion.starts[0]!;
+  expect(start.overridePct).toBeGreaterThanOrEqual(TRACK_LIMITS.minPct);
+  expect(start.overridePct).toBeLessThanOrEqual(TRACK_LIMITS.maxPct);
+  // The global speedPct on motion should still be 0 (tracking never calls motion.speed)
+  expect(motion.speedPct).toBe(0);
+  controller.enable(false);
+});
+
+test('zero target velocity stops and clears promptly', () => {
+  const motion = new FakeMotion();
+  const controller = new TrackController(motion);
+  controller.tracker.label = 'cat';
+  controller.enable(true);
+  // Strong off-centre target
+  controller.sample(sample([cat(580)], 1_000), 1_000);
+  controller.tick(1_000);
+  expect(controller.tick(1_050).active).toBe(true);
+  // Centred target -> velocity falls to 0
+  controller.sample(sample([cat(280)], 1_100), 1_100);
+  const stopped = controller.tick(1_100);
+  // Rate should decelerate toward 0 and eventually stop
+  expect(stopped.yaw).toBe(0);
+  expect(stopped.active).toBe(false);
   controller.enable(false);
 });
 

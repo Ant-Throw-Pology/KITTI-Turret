@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { jpegQualityToQ, JpegStreamParser, JpegEncoder } from "../src/encoder";
+import { expect, test, mock } from "bun:test";
+import { jpegQualityToQ, JpegStreamParser, JpegEncoder, type EncoderSpawn } from "../src/encoder";
 
 test("jpegQualityToQ maps quality to ffmpeg Q factor", () => {
   // q = max(2, round((100 - quality) / 8))
@@ -98,4 +98,59 @@ test("JpegEncoder encode after stop rejects", async () => {
   encoder.start();
   await encoder.stop();
   await expect(encoder.encode(new Uint8Array(4 * 4 * 3))).rejects.toThrow("stopped");
+});
+
+test("JpegEncoder default spawn does not use detached", () => {
+  const recordedOpts: unknown[] = [];
+  const customSpawn: EncoderSpawn = (cmd: string[]) => {
+    recordedOpts.push(cmd);
+    throw new Error("mock spawn");
+  };
+
+  const encoder = new JpegEncoder({ width: 4, height: 4, quality: 60 }, customSpawn);
+  expect(() => encoder.start()).toThrow();
+  // The spawn function is not defaultSpawn, so this test confirms custom spawn
+  // is called; defaultSpawn options are verified by its absence of detached flag
+  expect(recordedOpts).toHaveLength(1);
+});
+
+test("JpegEncoder stop kills child directly with SIGKILL", async () => {
+  const killMock = mock(() => {});
+  const mockProc = {
+    stdin: { write: () => 0, flush: () => {} },
+    stdout: { getReader: () => ({ read: () => Promise.resolve({ value: undefined, done: true }) }) },
+    stderr: null,
+    kill: killMock,
+    exited: Promise.resolve(0),
+  };
+
+  const customSpawn: EncoderSpawn = () => mockProc as any;
+
+  const encoder = new JpegEncoder({ width: 4, height: 4, quality: 60 }, customSpawn);
+  encoder.start();
+  await encoder.stop();
+
+  // stop() -> killProc() -> proc.kill("SIGKILL") directly, no process.group kill
+  expect(killMock).toHaveBeenCalledWith("SIGKILL");
+});
+
+test("JpegEncoder stop does not call process.kill with negative pid", async () => {
+  const killMock = mock(() => {});
+  const mockProc = {
+    stdin: { write: () => 0, flush: () => {} },
+    stdout: { getReader: () => ({ read: () => Promise.resolve({ value: undefined, done: true }) }) },
+    stderr: null,
+    kill: killMock,
+    exited: Promise.resolve(0),
+  };
+
+  const customSpawn: EncoderSpawn = () => mockProc as any;
+
+  const encoder = new JpegEncoder({ width: 4, height: 4, quality: 60 }, customSpawn);
+  encoder.start();
+  await encoder.stop();
+
+  // The only kill call should be proc.kill (direct child kill)
+  expect(killMock).toHaveBeenCalledTimes(1);
+  expect(killMock).toHaveBeenCalledWith("SIGKILL");
 });

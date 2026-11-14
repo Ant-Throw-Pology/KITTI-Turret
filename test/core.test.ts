@@ -45,3 +45,34 @@ test('tracking ignores stale boxes and limit prevents yaw', () => {
 test('relay polarity is unconfigured by default', () => {
   expect(loadConfig().relayActiveHigh).toBeNull();
 });
+
+test('KITTI_YAW_INVERT and KITTI_PITCH_INVERT reject non-0/1 values', () => {
+  process.env.KITTI_YAW_INVERT = '2';
+  expect(() => loadConfig()).toThrow('KITTI_YAW_INVERT');
+  process.env.KITTI_YAW_INVERT = 'yes';
+  expect(() => loadConfig()).toThrow('KITTI_YAW_INVERT');
+  delete process.env.KITTI_YAW_INVERT;
+
+  process.env.KITTI_PITCH_INVERT = '0';
+  expect(loadConfig().pitchInvert).toBe(false);
+  process.env.KITTI_PITCH_INVERT = '1';
+  expect(loadConfig().pitchInvert).toBe(true);
+  process.env.KITTI_PITCH_INVERT = 'true';
+  expect(() => loadConfig()).toThrow('KITTI_PITCH_INVERT');
+  delete process.env.KITTI_PITCH_INVERT;
+});
+
+test('KITTI_PING_TIMEOUT_MS defaults to 15000 with safe range 1000..120000', () => {
+  expect(loadConfig().pingTimeoutMs).toBe(15000);
+
+  process.env.KITTI_PING_TIMEOUT_MS = '999';
+  expect(() => loadConfig()).toThrow('KITTI_PING_TIMEOUT_MS');
+
+  process.env.KITTI_PING_TIMEOUT_MS = '120001';
+  expect(() => loadConfig()).toThrow('KITTI_PING_TIMEOUT_MS');
+
+  process.env.KITTI_PING_TIMEOUT_MS = '5000';
+  expect(loadConfig().pingTimeoutMs).toBe(5000);
+
+  delete process.env.KITTI_PING_TIMEOUT_MS;
+});

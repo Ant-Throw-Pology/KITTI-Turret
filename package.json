@@ -1,1 +1,24 @@
-{"name":"kitti-turret","version":"0.1.0","type":"module","private":true,"scripts":{"start":"bun src/index.ts","typecheck":"bun check","test":"bun test","build":"rm -rf dist && mkdir -p dist && bun build src/index.ts --target=bun --outfile=dist/index.js && bun build src/web/client.tsx --target=browser --outfile=dist/client.js --external:react --external:react-dom"},"dependencies":{"node-datachannel":"0.33.6","react":"^19.0.0","react-dom":"^19.0.0"},"devDependencies":{"@types/bun":"1.3.14","@types/react":"^19.0.0","@types/react-dom":"^19.0.0","typescript":"5.9.3"}}
+{
+  "name": "kitti-turret",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "bun check",
+    "test": "bun test",
+    "build": "rm -rf dist && bun build src/index.ts src/worker.ts --target=bun --production --outdir dist --external node-datachannel",
+    "dev:deploy": "./deploy/dev-deploy.sh"
+  },
+  "dependencies": {
+    "node-datachannel": "0.33.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "5.9.3"
+  }
+}

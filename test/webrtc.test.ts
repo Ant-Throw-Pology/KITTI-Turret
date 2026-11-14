@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test, mock } from 'bun:test';
 import { VideoPeer } from '../src/webrtc';
 
 class FakeChannel {
@@ -30,6 +30,17 @@ class FakePeerConnection {
   close() { this.closed = true; }
 }
 
+test('VideoPeer.signal with missing peer creation (no PeerConnection) does not block signaling', async () => {
+  // A peer that never received a channel should still tolerate signals gracefully
+  FakePeerConnection.instances = [];
+  const peer = new VideoPeer(() => {}, '', async () => ({ PeerConnection: FakePeerConnection }));
+  await peer.signal({ type: 'offer', sdp: 'offer-sdp' });
+  // Without a data channel, sendFrame returns false but does not throw
+  const bytes = new Uint8Array(15);
+  expect(peer.sendFrame(bytes)).toBe(false);
+  peer.close();
+});
+
 test('VideoPeer handles offer/answer and ICE signaling', async () => {
   FakePeerConnection.instances = [];
   const signals: unknown[] = [];
@@ -60,4 +71,38 @@ test('VideoPeer sends prefixed JPEG payloads over the video data channel with qu
   FakePeerConnection.instances[0]!.dataChannel?.(blocked);
   expect(peer.sendFrame(bytes)).toBe(false);
   peer.close();
+});
+
+test('VideoPeer.sendFrame tolerates a channel that throws on sendMessageBinary (close race)', async () => {
+  FakePeerConnection.instances = [];
+  const peer = new VideoPeer(() => {}, '', async () => ({ PeerConnection: FakePeerConnection }));
+  await peer.signal({ type: 'offer', sdp: 'offer-sdp' });
+  const channel = new FakeChannel(true, 0, 1024 * 1024);
+  // Override sendMessageBinary to throw as if the channel closed between isOpen and the call
+  const origSend = channel.sendMessageBinary.bind(channel);
+  channel.sendMessageBinary = mock(() => { throw new Error('channel closed'); });
+  FakePeerConnection.instances[0]!.dataChannel?.(channel);
+  const bytes = new Uint8Array(15);
+  // Should not throw — catch returns false
+  const result = peer.sendFrame(bytes);
+  expect(result).toBe(false);
+  peer.close();
+});
+
+test('VideoPeer catches loadRtc rejection and reports it on signal', async () => {
+  const failingLoadRtc = () => new Promise<any>((_, reject) => reject(new Error('node-datachannel missing')));
+  const peer = new VideoPeer(() => {}, '', failingLoadRtc);
+  // signal should throw the stored initError (caught by initialize's try/catch)
+  await expect(peer.signal({ type: 'offer', sdp: 'test' })).rejects.toThrow('node-datachannel missing');
+  // close should not throw even though init failed
+  peer.close();
+});
+
+test('VideoPeer tolerates close before init completes (closed flag races loading)', async () => {
+  const slowLoad = () => new Promise<any>(() => {}); // never resolves
+  const peer = new VideoPeer(() => {}, '', slowLoad);
+  // close immediately — should not throw and should prevent init from setting up pc/dc
+  peer.close();
+  // signal after close should succeed without throwing
+  await peer.signal({ type: 'offer', sdp: 'test' });
 });

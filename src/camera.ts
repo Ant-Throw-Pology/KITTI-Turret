@@ -26,7 +26,7 @@ export class Camera {
   private async open(device: string): Promise<void> {
     const { width, height, fps } = this.options;
     if (width < 1 || height < 1 || fps < 1) throw new Error("invalid camera dimensions or fps");
-    const proc = Bun.spawn([this.options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-vf", `crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',scale=${width}:${height},fps=${fps}`, "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"], { stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+    const proc = Bun.spawn([this.options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", device, "-vf", `crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',scale=${width}:${height},fps=${fps}`, "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     this.proc = proc;
     const stream = proc.stdout;
     if (!stream || typeof stream === "number") throw new Error("capture stdout unavailable");
@@ -65,7 +65,7 @@ export class Camera {
   stop(): void {
     this.closed = true;
     if (this.proc) {
-      try { process.kill(-this.proc.pid, "SIGTERM"); } catch { this.proc.kill(); }
+      try { this.proc.kill("SIGTERM"); } catch { /* process already exited */ }
       this.proc = undefined;
     }
   }
