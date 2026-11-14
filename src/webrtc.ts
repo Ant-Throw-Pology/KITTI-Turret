@@ -1,15 +1,16 @@
 type Signal = { type: string; sdp?: string; candidate?: string; mid?: string };
+type RtcModule = { PeerConnection: new (name: string, config: { iceServers: string[] }) => any };
 
 export class VideoPeer {
   private pc: any;
   private dc: any;
   private ready: Promise<void>;
   private closed = false;
-  constructor(private readonly sendSignal: (message: Signal) => void, private readonly stun = '') {
+  constructor(private readonly sendSignal: (message: Signal) => void, private readonly stun = '', private readonly loadRtc: () => Promise<RtcModule> = () => import('node-datachannel') as Promise<RtcModule>) {
     this.ready = this.initialize();
   }
   private async initialize(): Promise<void> {
-    const rtc = await import('node-datachannel');
+    const rtc = await this.loadRtc();
     if (this.closed) return;
     this.pc = new rtc.PeerConnection('kitti-video', { iceServers: this.stun ? [this.stun] : [] });
     this.pc.onLocalDescription((sdp: string, type: string) => this.sendSignal({ type: type.toLowerCase(), sdp }));
