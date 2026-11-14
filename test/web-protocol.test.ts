@@ -45,19 +45,19 @@ test('selecting a non-baseline YOLO target adds that class to baseline inference
 
 test('client source keeps required UI interaction guards wired', () => {
   const source = readFileSync('src/web/client.tsx', 'utf8');
-  expect(source).toContain('if (event.repeat) return');
+  expect(source).toContain("if (e.repeat) return");
   expect(source).toContain("key === 'shift'");
   expect(source).toContain('window.onblur');
-  expect(source).toContain('stopMotion(); cancelWater(); send({type:\'pump\',on:false})');
-  expect(source).toContain("send({type:'pump',on:true,durationMs:Number(pulseInput.value)})");
-  expect(source).toContain("send({type:'pump',on:false})");
+  expect(source).toContain('stopMotion(); cancelWater(); send({ type: ');
+  expect(source).toContain("send({ type: 'pump', on: true, durationMs: pulseMs })");
+  expect(source).toContain("send({ type: 'pump', on: false })");
 });
 
 test('client source echoes sliders only from explicit server fields', () => {
   const source = readFileSync('src/web/client.tsx', 'utf8');
-  expect(source).toContain('if (message.speed !== undefined)');
-  expect(source).toContain('if (message.aimX !== undefined && message.aimY !== undefined)');
-  expect(source).toContain('setAim(Number(message.aimX),Number(message.aimY))');
+  expect(source).toContain('if (msg.speed !== undefined) setSpeed(msg.speed)');
+  expect(source).toContain('if (msg.aimX !== undefined && msg.aimY !== undefined)');
+  expect(source).toContain('setAimX(Number(msg.aimX)); setAimY(Number(msg.aimY))');
 });
 
 test('dashboard keeps required viewport sizes free of tutorial text', () => {

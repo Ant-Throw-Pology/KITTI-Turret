@@ -1,15 +1,4 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KITTI</title><link rel="stylesheet" href="/dist/style.css"></head>
-<body><main class="dashboard">
-  <section class="video-panel"><div id="frame"><canvas id="video" width="640" height="480"></canvas><div id="boxes"></div><div id="aim"></div></div><div class="metrics"><span id="fps">FPS —</span><span id="latency">Latency —</span><span id="dropped">Dropped —</span><span id="npu">NPU —</span><span id="temperature">Temp —</span></div></section>
-  <section class="controls"><div class="row"><button id="enable">Enable</button><button id="estop" class="danger">E-STOP</button><button id="tracking">Tracking off</button></div>
-    <div class="pad"><button data-move="pitch:-1">▲</button><button data-move="yaw:-1">◀</button><button data-move="yaw:1">▶</button><button data-move="pitch:1">▼</button></div>
-    <label>Speed <input id="speed" type="range" min="10" max="200" value="100"><output id="speed-value">100%</output></label>
-    <div class="row"><button id="water">Water</button><label>Pulse <input id="pulse" type="range" min="50" max="2000" value="500"><output id="pulse-value">500 ms</output></label></div>
-    <div class="row"><span id="pump-state">Pump off</span><span id="switches">Yaw − — / + —</span></div>
-    <label>Target <input id="target" type="search" list="targets" placeholder="Class or tag"><datalist id="targets"></datalist></label>
-    <label>Strategy <select id="strategy"><option>confidence + area</option><option>confidence</option><option>area</option></select></label>
-    <label>Aim X <input id="aim-x" type="range" min="0" max="100" value="50"></label><label>Aim Y <input id="aim-y" type="range" min="0" max="100" value="50"></label>
-    <div id="error" role="alert"></div>
-  </section>
-</main><script type="module" src="/dist/client.js"></script></body></html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KITTI</title><link rel="stylesheet" href="/dist/style.css">
+<script type="importmap">{"imports":{"react":"https://esm.sh/react@19.3.1","react-dom":"https://esm.sh/react-dom@19.3.1"}}</script></head>
+<body><div id="root"></div><script type="module" src="/dist/client.js"></script></body></html>

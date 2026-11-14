@@ -1,5 +1,5 @@
 import { createServer, Socket } from 'node:net';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadConfig } from './config';
 import { PacketDecoder, PacketType, encodePacket } from './ipc';
@@ -269,7 +269,7 @@ export async function main(): Promise<void> {
     if (!socket) return;
     socket.write(encodePacket(PacketType.Control, new TextEncoder().encode(JSON.stringify({ type: 'classes', ids: classIds }))));
   };
-  const workerEntry = join(dirname(Bun.main), Bun.main.endsWith('.js') ? 'worker.js' : 'worker.ts');
+  const workerEntry = join(dirname(Bun.main), 'worker.ts');
   const supervisor = cfg.model && process.env.KITTI_EXTERNAL_WORKER !== '1' ? new WorkerSupervisor({
     spawn: () => Bun.spawn([process.execPath, workerEntry], { detached: true, stdin: 'ignore', stdout: 'ignore', stderr: 'inherit', env: process.env }),
     onEvent: (event, detail) => console.log(`worker ${event}`, detail ?? ''),
@@ -382,9 +382,9 @@ export async function main(): Promise<void> {
       const path = new URL(req.url).pathname;
       if (path === '/ws') return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
       if (path === '/estop' && req.method === 'POST') { estop(); return new Response('ok'); }
-      if (path === '/') return new Response(readFileSync('dist/index.html'), { headers: { 'content-type': 'text/html' } });
-      if (path === '/dist/client.js') return new Response(readFileSync('dist/client.js'), { headers: { 'content-type': 'application/javascript' } });
-      if (path === '/dist/style.css') return new Response(readFileSync('dist/style.css'), { headers: { 'content-type': 'text/css' } });
+      if (path === '/') return new Response(Bun.file('src/web/index.html'), { headers: { 'content-type': 'text/html' } });
+      if (path === '/dist/client.js') return new Response(Bun.file('dist/client.js'), { headers: { 'content-type': 'text/javascript;charset=utf-8' } });
+      if (path === '/dist/style.css') return new Response(Bun.file('src/web/style.css'), { headers: { 'content-type': 'text/css;charset=utf-8' } });
       return new Response('not found', { status: 404 });
     },
     websocket: {

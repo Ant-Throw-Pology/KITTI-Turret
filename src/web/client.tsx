@@ -1,123 +1,254 @@
-import { boxSize, boxStyle, classIdsForTarget, matchDetectionsToFrame, parseJpegFrame, targetOptions, type DetectionPacket } from './protocol';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { createRoot } from 'react-dom/client';
+import { classIdsForTarget, matchDetectionsToFrame, parseJpegFrame, targetOptions, boxSize, type DetectionPacket } from './protocol';
 
 type Control = Record<string, unknown>;
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-const canvas = $<HTMLCanvasElement>('video'), context = canvas.getContext('2d')!;
-const boxes = $('boxes');
-const send = (message: Control) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); };
-let peer: RTCPeerConnection | undefined, channel: RTCDataChannel | undefined;
-let lastSeq = -1, decoding = false, pending: ArrayBuffer | null = null;
-let currentFrame: { seq: number; timestamp: number } | undefined;
-const detections: DetectionPacket[] = [];
-let enabled = false, tracking = false, speed = 100;
-const held = new Set<string>();
-const keyMap: Record<string, string> = {arrowleft:'yaw:-1',a:'yaw:-1',arrowright:'yaw:1',d:'yaw:1',arrowup:'pitch:-1',w:'pitch:-1',arrowdown:'pitch:1',s:'pitch:1'};
-const emitHeld = () => { for (const motion of held) { const [axis, dir] = motion.split(':'); send({type:'motor',axis,dir:Number(dir),on:true,slow:shift}); } };
-let shift = false;
-function stopMotion() { for (const motion of held) { const [axis,dir] = motion.split(':'); send({type:'motor',axis,dir:Number(dir),on:false}); } held.clear(); }
-function startMotion(motion: string) { if (held.has(motion)) return; held.add(motion); emitHeld(); }
-function releaseMotion(motion: string) { if (!held.delete(motion)) return; const [axis,dir] = motion.split(':'); send({type:'motor',axis,dir:Number(dir),on:false}); }
-const speedInput = $<HTMLInputElement>('speed');
-speedInput.oninput = () => { speed = Number(speedInput.value); $('speed-value').textContent = `${speed}%`; send({type:'speed',pct:speed}); };
-const pulseInput = $<HTMLInputElement>('pulse');
-pulseInput.oninput = () => { $('pulse-value').textContent = `${pulseInput.value} ms`; };
-const targetInput = $<HTMLInputElement>('target');
-const targetList = $<HTMLDataListElement>('targets');
-const aimXInput = $<HTMLInputElement>('aim-x'), aimYInput = $<HTMLInputElement>('aim-y');
-for (const option of targetOptions()) { const el=document.createElement('option'); el.value=option.value; el.label=option.label; targetList.append(el); }
-$('enable').onclick = () => send({type:'enable',on:!enabled});
-$('estop').onclick = () => { stopMotion(); stopWater(); send({type:'estop'}); };
-$('tracking').onclick = () => send({type:'tracking',on:!tracking,label:targetInput.value,strategy:$<HTMLSelectElement>('strategy').value});
-for (const button of document.querySelectorAll<HTMLButtonElement>('[data-move]')) {
-  const motion = button.dataset.move!;
-  button.onpointerdown = event => { event.preventDefault(); button.setPointerCapture(event.pointerId); startMotion(motion); };
-  button.onpointerup = () => releaseMotion(motion);
-  button.onpointercancel = () => releaseMotion(motion);
-  button.onlostpointercapture = () => releaseMotion(motion);
-}
-const water = $('water');
-let waterTimer: number | undefined, waterHeld = false, waterDown = false;
-function startWater() { if (waterDown) return; waterDown = true; waterHeld = false; waterTimer = window.setTimeout(() => { if (!waterDown) return; waterHeld = true; send({type:'pump',on:true}); water.classList.add('active'); },250); }
-function stopWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); water.classList.remove('active'); if (waterHeld) send({type:'pump',on:false}); else send({type:'pump',on:true,durationMs:Number(pulseInput.value)}); waterHeld = false; }
-function cancelWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); water.classList.remove('active'); if (waterHeld) send({type:'pump',on:false}); waterHeld = false; }
-water.onpointerdown = event => { event.preventDefault(); water.setPointerCapture(event.pointerId); startWater(); };
-water.onpointerup = stopWater;
-water.onpointercancel = cancelWater;
-water.onlostpointercapture = cancelWater;
-document.onkeydown = event => {
-  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
-  const key = event.key.toLowerCase();
-  if (key === 'shift') { if (!shift) { shift = true; emitHeld(); } return; }
-  if (event.repeat) return;
-  if (keyMap[key]) { event.preventDefault(); startMotion(keyMap[key]); }
-  else if (key === 'f') { event.preventDefault(); startWater(); }
-  else if (key === 'e') send({type:'enable',on:!enabled});
-  else if (key === 'q' || key === 'escape') { stopMotion(); cancelWater(); send({type:'estop'}); }
-  else if (key === 't') $('tracking').click();
-};
-document.onkeyup = event => {
-  const key = event.key.toLowerCase();
-  if (key === 'shift') { shift = false; emitHeld(); }
-  else if (keyMap[key]) releaseMotion(keyMap[key]);
-  else if (key === 'f') stopWater();
-};
-window.onblur = () => { stopMotion(); cancelWater(); send({type:'pump',on:false}); };
-window.onbeforeunload = () => { stopMotion(); send({type:'pump',on:false}); };
-function setAim(x: number, y: number) { aimXInput.value=String(Math.round(x*100)); aimYInput.value=String(Math.round(y*100)); $('aim').style.left=`${x*100}%`; $('aim').style.top=`${y*100}%`; }
-for (const input of [aimXInput, aimYInput]) input.oninput = () => { const x=Number(aimXInput.value)/100,y=Number(aimYInput.value)/100; setAim(x,y); send({type:'aim',x,y}); };
-targetInput.onchange = () => { send({type:'target',label:targetInput.value}); send({type:'classes',ids:classIdsForTarget(targetInput.value)}); };
-$<HTMLSelectElement>('strategy').onchange = () => send({type:'strategy',value:$<HTMLSelectElement>('strategy').value});
-function renderDetections() {
-  boxes.replaceChildren();
-  if (!currentFrame) return;
-  const message = matchDetectionsToFrame(currentFrame, detections);
-  if (!message) return;
-  const width=message.width||640,height=message.height||480;
-  for (const box of message.boxes||[]) {
-    const size = boxSize(box); if (size.width <= 0 || size.height <= 0) continue;
-    const el=document.createElement('div'); el.className='box'; Object.assign(el.style, boxStyle(box,width,height));
-    const label=document.createElement('span');label.textContent=`${box.label} ${Math.round(box.confidence*100)}%`;el.append(label);boxes.append(el);
-  }
-}
-async function drawLatest() {
-  if (decoding || !pending) return;
-  decoding = true;
-  const data = pending; pending = null;
-  try {
-    const frame = parseJpegFrame(data), seq = frame.seq;
-    if (seq > lastSeq) {
-      const blob = new Blob([frame.jpeg],{type:'image/jpeg'});
-      const bitmap = await createImageBitmap(blob);
-      if (seq > lastSeq) { context.drawImage(bitmap,0,0,canvas.width,canvas.height); lastSeq=seq; currentFrame={seq,timestamp:frame.timestamp}; renderDetections(); }
-      bitmap.close();
+const send = (m: Control) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
+
+const TARGETS = targetOptions();
+const KEY_MAP: Record<string, string> = { arrowleft: 'yaw:-1', a: 'yaw:-1', arrowright: 'yaw:1', d: 'yaw:1', arrowup: 'pitch:-1', w: 'pitch:-1', arrowdown: 'pitch:1', s: 'pitch:1' };
+
+function App() {
+  const [enabled, setEnabled] = useState(false);
+  const [tracking, setTracking] = useState(false);
+  const [speed, setSpeed] = useState(100);
+  const [pulseMs, setPulseMs] = useState(500);
+  const [target, setTarget] = useState('');
+  const [strategy, setStrategy] = useState('confidence + area');
+  const [aimX, setAimX] = useState(0.5);
+  const [aimY, setAimY] = useState(0.5);
+  const [error, setError] = useState('');
+  const [pumpState, setPumpState] = useState('Pump off');
+  const [switches, setSwitches] = useState('');
+  const [fps, setFps] = useState('FPS —');
+  const [latency, setLatency] = useState('Latency —');
+  const [dropped, setDropped] = useState('Dropped —');
+
+  const [detectionPackets, setDetectionPackets] = useState<DetectionPacket[]>([]);
+  const [currentFrame, setCurrentFrame] = useState<{ seq: number; timestamp: number } | undefined>();
+  const [matchedBoxes, setMatchedBoxes] = useState<DetectionPacket | undefined>();
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const heldRef = useRef(new Set<string>());
+  const shiftRef = useRef(false);
+  const lastSeqRef = useRef(-1);
+  const decodingRef = useRef(false);
+  const pendingRef = useRef<ArrayBuffer | null>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const channelRef = useRef<RTCDataChannel | null>(null);
+
+  const emitHeld = useCallback(() => {
+    const shift = shiftRef.current;
+    for (const motion of heldRef.current) {
+      const [axis, dir] = motion.split(':');
+      send({ type: 'motor', axis, dir: Number(dir), on: true, slow: shift });
     }
-  } catch (error) { $('error').textContent = String(error); }
-  decoding = false; if (pending) void drawLatest();
+  }, []);
+
+  const stopMotion = useCallback(() => {
+    for (const motion of heldRef.current) {
+      const [axis, dir] = motion.split(':');
+      send({ type: 'motor', axis, dir: Number(dir), on: false });
+    }
+    heldRef.current.clear();
+  }, []);
+
+  const startMotion = useCallback((motion: string) => {
+    if (heldRef.current.has(motion)) return;
+    heldRef.current.add(motion);
+    emitHeld();
+  }, [emitHeld]);
+
+  const releaseMotion = useCallback((motion: string) => {
+    if (!heldRef.current.delete(motion)) return;
+    const [axis, dir] = motion.split(':');
+    send({ type: 'motor', axis, dir: Number(dir), on: false });
+  }, []);
+
+  // WebSocket connection
+  useEffect(() => {
+    ws.onopen = () => { connectPeer(); send({ type: 'ping' }); };
+    ws.onclose = () => { stopMotion(); cancelWater(); peerRef.current?.close(); setError('Connection lost'); };
+    ws.onmessage = (event) => {
+      let msg: any;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.type === 'motorState') {
+        setEnabled(Boolean(msg.enabled));
+        if (msg.speed !== undefined) setSpeed(msg.speed);
+        if (msg.error) setError(msg.error);
+      } else if (msg.type === 'pumpState') {
+        setPumpState(msg.on ? `Pump on${msg.remainingMs ? ` ${msg.remainingMs} ms` : ''}` : 'Pump off');
+        if (msg.error) setError(msg.error);
+      } else if (msg.type === 'switches') {
+        setSwitches(`Yaw − ${msg.negative ? 'ON' : 'off'} / + ${msg.positive ? 'ON' : 'off'}`);
+      } else if (msg.type === 'trackingState') {
+        setTracking(Boolean(msg.enabled));
+        if (msg.aimX !== undefined && msg.aimY !== undefined) { setAimX(Number(msg.aimX)); setAimY(Number(msg.aimY)); }
+      } else if (msg.type === 'detections') {
+        setDetectionPackets(prev => { const next = [...prev, msg]; while (next.length > 30) next.shift(); return next; });
+        if (msg.fps !== undefined) setFps(`FPS ${msg.fps}`);
+        if (msg.dropped !== undefined) setDropped(`Dropped ${msg.dropped}`);
+        if (msg.timestamp !== undefined) setLatency(`Latency ${Math.max(0, Date.now() - msg.timestamp)} ms`);
+      } else if (msg.type === 'error') {
+        setError(msg.error ?? msg.message);
+      } else if (msg.type === 'answer' && peerRef.current) {
+        peerRef.current.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      } else if (msg.type === 'ice' && peerRef.current) {
+        peerRef.current.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.mid });
+      }
+    };
+    const ping = setInterval(() => send({ type: 'ping' }), 5000);
+    return () => { clearInterval(ping); stopMotion(); send({ type: 'pump', on: false }); peerRef.current?.close(); };
+  }, [stopMotion]);
+
+  // Match detections to current frame
+  useEffect(() => {
+    if (!currentFrame) { setMatchedBoxes(undefined); return; }
+    setMatchedBoxes(matchDetectionsToFrame(currentFrame, detectionPackets));
+  }, [currentFrame, detectionPackets]);
+
+  // WebRTC setup
+  async function connectPeer() {
+    peerRef.current?.close();
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    const dc = pc.createDataChannel('video');
+    dc.binaryType = 'arraybuffer';
+    dc.onmessage = (event) => {
+      pendingRef.current = event.data as ArrayBuffer;
+      if (!decodingRef.current) void drawLatest();
+    };
+    pc.onicecandidate = (event) => {
+      if (event.candidate) send({ type: 'ice', candidate: event.candidate.candidate, mid: event.candidate.sdpMid });
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send({ type: 'offer', sdp: offer.sdp });
+    peerRef.current = pc;
+    channelRef.current = dc;
+  }
+
+  async function drawLatest() {
+    if (decodingRef.current || !pendingRef.current) return;
+    decodingRef.current = true;
+    const data = pendingRef.current;
+    pendingRef.current = null;
+    try {
+      const frame = parseJpegFrame(data);
+      if (frame.seq > lastSeqRef.current) {
+        const blob = new Blob([frame.jpeg], { type: 'image/jpeg' });
+        const bitmap = await createImageBitmap(blob);
+        if (frame.seq > lastSeqRef.current && canvasRef.current) {
+          const ctx = canvasRef.current.getContext('2d');
+          if (ctx) { ctx.drawImage(bitmap, 0, 0, canvasRef.current.width, canvasRef.current.height); }
+          lastSeqRef.current = frame.seq;
+          setCurrentFrame({ seq: frame.seq, timestamp: frame.timestamp });
+        }
+        bitmap.close();
+      }
+    } catch (e) { setError(String(e)); }
+    decodingRef.current = false;
+    if (pendingRef.current) void drawLatest();
+  }
+
+  let waterTimer: number | undefined;
+  let waterHeld = false;
+  let waterDown = false;
+
+  function startWater() { if (waterDown) return; waterDown = true; waterHeld = false; waterTimer = window.setTimeout(() => { if (!waterDown) return; waterHeld = true; send({ type: 'pump', on: true }); }, 250); }
+  function stopWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); if (waterHeld) send({ type: 'pump', on: false }); else send({ type: 'pump', on: true, durationMs: pulseMs }); waterHeld = false; }
+  function cancelWater() { if (!waterDown) return; waterDown = false; clearTimeout(waterTimer); if (waterHeld) send({ type: 'pump', on: false }); waterHeld = false; }
+
+  // Keyboard handler
+  useEffect(() => {
+    const onkeydown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      const key = e.key.toLowerCase();
+      if (key === 'shift') { shiftRef.current = true; emitHeld(); return; }
+      if (e.repeat) return;
+      if (KEY_MAP[key]) { e.preventDefault(); startMotion(KEY_MAP[key]); }
+      else if (key === 'f') { e.preventDefault(); startWater(); }
+      else if (key === 'e') send({ type: 'enable', on: !enabled });
+      else if (key === 'q' || key === 'escape') { stopMotion(); cancelWater(); send({ type: 'estop' }); }
+    };
+    const onkeyup = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === 'shift') { shiftRef.current = false; emitHeld(); }
+      else if (KEY_MAP[key]) releaseMotion(KEY_MAP[key]);
+      else if (key === 'f') stopWater();
+    };
+    window.addEventListener('keydown', onkeydown);
+    window.addEventListener('keyup', onkeyup);
+    window.onblur = () => { stopMotion(); cancelWater(); send({ type: 'pump', on: false }); };
+    return () => {
+      window.removeEventListener('keydown', onkeydown);
+      window.removeEventListener('keyup', onkeyup);
+    };
+  }, [enabled, emitHeld, startMotion, releaseMotion, stopMotion, pulseMs]);
+
+  const matched = currentFrame && matchedBoxes ? matchedBoxes : undefined;
+  const matchedWidth = matched?.width ?? 640;
+  const matchedHeight = matched?.height ?? 480;
+
+  return (
+    <main className="dashboard">
+      <section className="video-panel">
+        <div id="frame">
+          <canvas id="video" ref={canvasRef} width="640" height="480" />
+          <div id="boxes">
+            {matched?.boxes?.filter(b => boxSize(b).width > 0 && boxSize(b).height > 0).map((box, i) => {
+              const s = boxSize(box);
+              return (
+                <div key={i} className="box"
+                  style={{ left: `${box.x / matchedWidth * 100}%`, top: `${box.y / matchedHeight * 100}%`, width: `${s.width / matchedWidth * 100}%`, height: `${s.height / matchedHeight * 100}%` }}>
+                  <span>{box.label} {Math.round(box.confidence * 100)}%</span>
+                </div>
+              );
+            })}
+          </div>
+          <div id="aim" style={{ left: `${aimX * 100}%`, top: `${aimY * 100}%` }} />
+        </div>
+        <div className="metrics">
+          <span id="fps">{fps}</span>
+          <span id="latency">{latency}</span>
+          <span id="dropped">{dropped}</span>
+          <span id="npu">NPU —</span>
+          <span id="temperature">Temp —</span>
+        </div>
+      </section>
+      <section className="controls">
+        <div className="row">
+          <button id="enable" onClick={() => send({ type: 'enable', on: !enabled })}>{enabled ? 'Disable' : 'Enable'}</button>
+          <button id="estop" className="danger" onClick={() => { stopMotion(); cancelWater(); send({ type: 'estop' }); }}>E-STOP</button>
+          <button id="tracking" onClick={() => send({ type: 'tracking', on: !tracking, label: target, strategy })}>
+            {tracking ? 'Tracking on' : 'Tracking off'}
+          </button>
+        </div>
+        <div className="pad">
+          <button data-move="pitch:-1" onPointerDown={e => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); startMotion('pitch:-1'); }} onPointerUp={() => releaseMotion('pitch:-1')} onPointerCancel={() => releaseMotion('pitch:-1')} onLostPointerCapture={() => releaseMotion('pitch:-1')}>▲</button>
+          <button data-move="yaw:-1" onPointerDown={e => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); startMotion('yaw:-1'); }} onPointerUp={() => releaseMotion('yaw:-1')} onPointerCancel={() => releaseMotion('yaw:-1')} onLostPointerCapture={() => releaseMotion('yaw:-1')}>◀</button>
+          <button data-move="yaw:1" onPointerDown={e => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); startMotion('yaw:1'); }} onPointerUp={() => releaseMotion('yaw:1')} onPointerCancel={() => releaseMotion('yaw:1')} onLostPointerCapture={() => releaseMotion('yaw:1')}>▶</button>
+          <button data-move="pitch:1" onPointerDown={e => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); startMotion('pitch:1'); }} onPointerUp={() => releaseMotion('pitch:1')} onPointerCancel={() => releaseMotion('pitch:1')} onLostPointerCapture={() => releaseMotion('pitch:1')}>▼</button>
+        </div>
+        <label>Speed <input id="speed" type="range" min="10" max="200" value={speed} onChange={e => { const v = Number(e.target.value); setSpeed(v); send({ type: 'speed', pct: v }); }} /><output id="speed-value">{speed}%</output></label>
+        <div className="row">
+          <button id="water" onPointerDown={e => { e.preventDefault(); (e.target as HTMLElement).setPointerCapture(e.pointerId); startWater(); }} onPointerUp={stopWater} onPointerCancel={cancelWater} onLostPointerCapture={cancelWater}>Water</button>
+          <label>Pulse <input id="pulse" type="range" min="50" max="2000" value={pulseMs} onChange={e => setPulseMs(Number(e.target.value))} /><output id="pulse-value">{pulseMs} ms</output></label>
+        </div>
+        <div className="row"><span id="pump-state">{pumpState}</span><span id="switches">{switches}</span></div>
+        <label>Target <input id="target" type="search" list="targets" value={target} onChange={e => setTarget(e.target.value)} onBlur={() => { send({ type: 'target', label: target }); send({ type: 'classes', ids: classIdsForTarget(target) }); }} placeholder="Class or tag" />
+          <datalist id="targets">{TARGETS.map((opt, i) => <option key={i} value={opt.value} label={opt.label} />)}</datalist>
+        </label>
+        <label>Strategy <select id="strategy" value={strategy} onChange={e => { setStrategy(e.target.value); send({ type: 'strategy', value: e.target.value }); }}>
+          <option>confidence + area</option><option>confidence</option><option>area</option>
+        </select></label>
+        <label>Aim X <input id="aim-x" type="range" min="0" max="100" value={Math.round(aimX * 100)} onChange={e => { const v = Number(e.target.value) / 100; setAimX(v); send({ type: 'aim', x: v, y: aimY }); }} /></label>
+        <label>Aim Y <input id="aim-y" type="range" min="0" max="100" value={Math.round(aimY * 100)} onChange={e => { const v = Number(e.target.value) / 100; setAimY(v); send({ type: 'aim', x: aimX, y: v }); }} /></label>
+        <div id="error" role="alert">{error}</div>
+      </section>
+    </main>
+  );
 }
-async function connectPeer() {
-  peer?.close(); peer = new RTCPeerConnection({iceServers:[]});
-  channel = peer.createDataChannel('video'); channel.binaryType = 'arraybuffer';
-  channel.onmessage = event => { pending = event.data as ArrayBuffer; void drawLatest(); };
-  peer.onicecandidate = event => { if (event.candidate) send({type:'ice',candidate:event.candidate.candidate,mid:event.candidate.sdpMid}); };
-  const offer = await peer.createOffer(); await peer.setLocalDescription(offer); send({type:'offer',sdp:offer.sdp});
-}
-ws.onopen = () => { void connectPeer(); send({type:'ping'}); };
-ws.onclose = () => { stopMotion(); cancelWater(); peer?.close(); $('error').textContent='Connection lost'; };
-setInterval(() => send({type:'ping'}),5000);
-ws.onmessage = async event => {
-  let message: any;
-  try { message = JSON.parse(event.data); } catch { return; }
-  if (message.type === 'answer' && peer) await peer.setRemoteDescription({type:'answer',sdp:message.sdp});
-  else if (message.type === 'ice' && peer) await peer.addIceCandidate({candidate:message.candidate,sdpMid:message.mid});
-  else if (message.type === 'motorState') { enabled=Boolean(message.enabled); $('enable').textContent=enabled?'Disable':'Enable'; if (message.speed !== undefined) { speed=message.speed; speedInput.value=String(speed); $('speed-value').textContent=`${speed}%`; } if (message.error) $('error').textContent=message.error; }
-  else if (message.type === 'pumpState') { $('pump-state').textContent=message.on?`Pump on${message.remainingMs?` ${message.remainingMs} ms`:''}`:'Pump off'; if (message.error) $('error').textContent=message.error; }
-  else if (message.type === 'switches') $('switches').textContent=`Yaw − ${message.negative?'ON':'off'} / + ${message.positive?'ON':'off'}`;
-  else if (message.type === 'trackingState') { tracking=Boolean(message.enabled); $('tracking').textContent=tracking?'Tracking on':'Tracking off'; if (message.aimX !== undefined && message.aimY !== undefined) setAim(Number(message.aimX),Number(message.aimY)); }
-  else if (message.type === 'detections') {
-    detections.push(message); while (detections.length > 30) detections.shift(); renderDetections();
-    if (message.fps!==undefined) $('fps').textContent=`FPS ${message.fps}`;
-    if (message.dropped!==undefined) $('dropped').textContent=`Dropped ${message.dropped}`;
-    if (message.timestamp!==undefined) $('latency').textContent=`Latency ${Math.max(0,Date.now()-message.timestamp)} ms`;
-  } else if (message.type==='error') $('error').textContent=message.error ?? message.message;
-};
+
+const root = document.getElementById('root');
+if (root) createRoot(root).render(<App />);
