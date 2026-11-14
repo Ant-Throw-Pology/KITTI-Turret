@@ -1,6 +1,13 @@
 import { buildTagFramePacket } from "./tag_worker";
 import type { Detection } from "./yolo";
 
+export const APRILTAG_CLASS_ID_OFFSET = 1000;
+
+export function apriltagClassId(tagId: number): number {
+  if (!Number.isInteger(tagId) || tagId < 0) throw new Error("invalid AprilTag id");
+  return APRILTAG_CLASS_ID_OFFSET + tagId;
+}
+
 function finite(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value); }
 
 export function parseTagResultLine(line: string): { sequence: number; boxes: Detection[] } | undefined {
@@ -10,7 +17,7 @@ export function parseTagResultLine(line: string): { sequence: number; boxes: Det
   for (const box of parsed.boxes) {
     if (!box || typeof box !== "object") return undefined;
     const candidate = box as Record<string, unknown>;
-    if (typeof candidate.label !== "string" || !Number.isInteger(candidate.classId)) return undefined;
+    if (typeof candidate.label !== "string" || !Number.isInteger(candidate.classId) || (candidate.classId as number) < APRILTAG_CLASS_ID_OFFSET) return undefined;
     if (![candidate.confidence, candidate.x, candidate.y, candidate.width, candidate.height].every(finite)) return undefined;
     if ((candidate.width as number) <= 0 || (candidate.height as number) <= 0) return undefined;
     boxes.push({

@@ -3,7 +3,7 @@ import { letterbox } from "../src/preprocess";
 import { decodeFp16, fp16Table, nms } from "../src/yolo";
 import { buildTagFramePacket, grayscale } from "../src/tag_worker";
 import { NpuLock, packRknnInput, readRknnOutput, RKNN_FP16_OUTPUT_BYTES, RKNN_INPUT_SIZE, RKNN_OUTPUT_SIZE, RKNN_TENSOR_NHWC, RKNN_TENSOR_UINT8 } from "../src/rknn";
-import { parseTagResultLine } from "../src/apriltag";
+import { APRILTAG_CLASS_ID_OFFSET, apriltagClassId, parseTagResultLine } from "../src/apriltag";
 import { existsSync } from "node:fs";
 
 test("letterbox swaps BGR and centers aspect ratio", () => {
@@ -50,10 +50,14 @@ test("AprilTag frame packet uses a 12-byte little-endian header plus grayscale p
   expect(() => buildTagFramePacket(1, new Uint8Array(2), 1, 1)).toThrow(/BGR/);
 });
 test("AprilTag result parser accepts only the detection contract", () => {
-  const valid = parseTagResultLine(JSON.stringify({ sequence: 9, boxes: [{ label: "tag:1", classId: 1001, confidence: 1, x: 2, y: 3, width: 4, height: 5 }] }));
+  expect(APRILTAG_CLASS_ID_OFFSET).toBe(1000);
+  expect(apriltagClassId(1)).toBe(1001);
+  expect(() => apriltagClassId(-1)).toThrow(/AprilTag/);
+  const valid = parseTagResultLine(JSON.stringify({ sequence: 9, boxes: [{ label: "tag:1", classId: apriltagClassId(1), confidence: 1, x: 2, y: 3, width: 4, height: 5 }] }));
   expect(valid?.sequence).toBe(9);
   expect(valid?.boxes[0]).toMatchObject({ label: "tag:1", classId: 1001, width: 4 });
   expect(parseTagResultLine(JSON.stringify({ sequence: -1, boxes: [] }))).toBeUndefined();
+  expect(parseTagResultLine(JSON.stringify({ sequence: 1, boxes: [{ label: "tag", classId: -1, confidence: 1, x: 0, y: 0, width: 1, height: 1 }] }))).toBeUndefined();
   expect(parseTagResultLine(JSON.stringify({ sequence: 1, boxes: [{ label: "tag", classId: 1, confidence: 1, x: 0, y: 0, width: 0, height: 1 }] }))).toBeUndefined();
   expect(() => parseTagResultLine("not json")).toThrow();
 });

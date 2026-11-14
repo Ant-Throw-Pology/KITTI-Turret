@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#define APRILTAG_CLASS_ID_OFFSET 1000
+
 /* This helper intentionally owns its detector and reads one grayscale frame at a time. */
 int main(void) {
   apriltag_family_t *family = tag36h11_create();
@@ -37,7 +39,7 @@ int main(void) {
         if (tag->p[j][1] < y0) y0 = tag->p[j][1];
         if (tag->p[j][1] > y1) y1 = tag->p[j][1];
       }
-      printf("%s{\"label\":\"tag36h11:%d\",\"classId\":-1,\"confidence\":1,\"x\":%.3f,\"y\":%.3f,\"width\":%.3f,\"height\":%.3f}", i ? "," : "", tag->id, x0, y0, x1-x0, y1-y0);
+      printf("%s{\"label\":\"tag36h11:%d\",\"classId\":%d,\"confidence\":1,\"x\":%.3f,\"y\":%.3f,\"width\":%.3f,\"height\":%.3f}", i ? "," : "", tag->id, APRILTAG_CLASS_ID_OFFSET + tag->id, x0, y0, x1-x0, y1-y0);
     }
     puts("]}"); fflush(stdout);
     apriltag_detections_destroy(found);
