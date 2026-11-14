@@ -55,6 +55,15 @@ class FakeWorker {
     }
     return undefined;
   }
+  frame(seq: number, timestamp: number, payload: Uint8Array): void {
+    const header = new Uint8Array(12);
+    new DataView(header.buffer).setUint32(0, seq, true);
+    new DataView(header.buffer).setBigUint64(4, BigInt(timestamp), true);
+    const combined = new Uint8Array(header.length + payload.length);
+    combined.set(header);
+    combined.set(payload, 12);
+    this.socket.write(encodePacket(PacketType.Frame, combined));
+  }
   detection(payload: unknown): void {
     this.socket.write(encodePacket(PacketType.Detection, new TextEncoder().encode(JSON.stringify(payload))));
   }
@@ -239,6 +248,83 @@ test('fake worker reconnects with class config and tracking drives mock motors',
     try { ws?.close(); } catch { /* already closed */ }
     worker?.close();
     secondWorker?.close();
+    server.kill('SIGTERM');
+    const exited = await Promise.race([server.exited, Bun.sleep(4_000).then(() => -1)]);
+    if (exited === -1) server.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test('fake worker frame packets produce frame broadcasts from production build', async () => {
+  // Build the production artifact first
+  const buildResult = Bun.spawnSync(['bun', 'run', 'build'], { cwd: root, stderr: 'pipe' });
+  expect(buildResult.exitCode).toBe(0);
+
+  const dir = mkdtempSync(join(tmpdir(), 'kitti-frame-'));
+  const socketPath = join(dir, 'turret.sock');
+  const port = await freePort();
+  const env = {
+    ...process.env,
+    KITTI_MOCK: '1',
+    KITTI_HOST: '127.0.0.1',
+    KITTI_PORT: String(port),
+    KITTI_SOCKET: socketPath,
+    KITTI_YAW_NEGATIVE_SWITCH: 'GPIO1_B6',
+    KITTI_EXTERNAL_WORKER: '1',
+    KITTI_MODEL: '',
+  };
+  const server = Bun.spawn([process.execPath, join(root, 'dist', 'index.js')], {
+    cwd: join(root, 'dist'), env, stdout: 'pipe', stderr: 'pipe',
+  });
+  let worker: FakeWorker | undefined;
+  let ws: WebSocket | undefined;
+  try {
+    let url = '';
+    const reader = server.stdout.getReader();
+    const decoder = new TextDecoder();
+    let output = '';
+    while (!url) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server exited before listening: ${output}`);
+      output += decoder.decode(value, { stream: true });
+      const match = /KITTI (http:\/\/\S+)/.exec(output);
+      if (match) url = match[1]!;
+    }
+    reader.releaseLock();
+
+    worker = await FakeWorker.connect(socketPath);
+    await until(() => worker!.classes(), 'initial class config');
+
+    const wsUrl = new URL('/ws', url);
+    wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const client = await openSocket(wsUrl.href);
+    ws = client.socket;
+    await until(() => client.messages.find(m => m.type === 'workerState' && m.connected), 'worker connected');
+
+    // Minimal valid JPEG: SOI (0xFFD8) + EOI (0xFFD9)
+    const miniJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+
+    const sendTime = Date.now();
+    worker!.frame(1, sendTime, miniJpeg);
+    const f1 = await until(() => client.messages.find(m => m.type === 'frame' && m.seq === 1), 'seq 1');
+    expect(f1.timestamp).toBe(sendTime);
+
+    const sendTime2 = Date.now();
+    worker!.frame(2, sendTime2, miniJpeg);
+    const f2 = await until(() => client.messages.find(m => m.type === 'frame' && m.seq === 2), 'seq 2');
+    expect(f2.timestamp).toBe(sendTime2);
+
+    const sendTime3 = Date.now();
+    worker!.frame(3, sendTime3, miniJpeg);
+    const f3 = await until(() => client.messages.find(m => m.type === 'frame' && m.seq === 3), 'seq 3');
+    expect(f3.timestamp).toBe(sendTime3);
+
+    const frameMessages = client.messages.filter(m => m.type === 'frame');
+    expect(frameMessages.length).toBe(3);
+    expect(frameMessages.map(m => m.seq)).toEqual([1, 2, 3]);
+  } finally {
+    ws?.close();
+    worker?.close();
     server.kill('SIGTERM');
     const exited = await Promise.race([server.exited, Bun.sleep(4_000).then(() => -1)]);
     if (exited === -1) server.kill('SIGKILL');
