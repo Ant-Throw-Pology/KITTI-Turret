@@ -1,0 +1,16 @@
+[Unit]
+Description=KITTI Turret
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/kitti-turret
+ExecStart=/usr/local/bin/bun dist/index.js
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=5
+EnvironmentFile=-%h/kitti-turret/turret.env
+
+[Install]
+WantedBy=default.target
