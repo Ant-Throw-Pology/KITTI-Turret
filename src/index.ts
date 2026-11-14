@@ -401,12 +401,31 @@ export async function main(): Promise<void> {
     try { broadcast({ type: 'switches', ...manual.switches() }); } catch { /* ignore a failed read */ }
   }, 250) : null;
 
+  const trustedOrigin = process.env.KITTI_TRUSTED_ORIGIN;
+  /** Reject requests whose explicit Origin does not match the server origin. */
+  function checkOrigin(req: Request): boolean {
+    const origin = req.headers.get('Origin');
+    if (!origin) return true; // non-browser client
+    if (trustedOrigin && origin === trustedOrigin) return true;
+    try {
+      const host = req.headers.get('Host') ?? cfg.host;
+      const proto = host === '127.0.0.1' || host === 'localhost' || host.startsWith('localhost:') || host.startsWith('127.') ? 'http' : 'https';
+      return origin === `${proto}://${host}`;
+    } catch { return false; }
+  }
+
   const server = Bun.serve({
     hostname: cfg.host, port: cfg.port,
     fetch(req, s) {
       const path = new URL(req.url).pathname;
-      if (path === '/ws') return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
-      if (path === '/estop' && req.method === 'POST') { estop(); return new Response('ok'); }
+      if (path === '/ws') {
+        if (!checkOrigin(req)) return new Response('forbidden', { status: 403 });
+        return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
+      }
+      if (path === '/estop' && req.method === 'POST') {
+        if (!checkOrigin(req)) return new Response('forbidden', { status: 403 });
+        estop(); return new Response('ok');
+      }
       if (path === '/') return new Response(Bun.file(indexHtmlPath), { headers: { 'content-type': 'text/html' } });
       if (path === '/dist/client.js') return new Response(Bun.file(clientJsPath), { headers: { 'content-type': 'text/javascript;charset=utf-8' } });
       if (path === '/dist/style.css') return new Response(Bun.file(styleCssPath), { headers: { 'content-type': 'text/css;charset=utf-8' } });
