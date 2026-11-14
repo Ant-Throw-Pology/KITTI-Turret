@@ -24,7 +24,7 @@ test('frame window drops oldest queued and detects stale ack', () => {
 });
 test('tracking ignores stale boxes and limit prevents yaw', () => {
   const tracker = new Tracker(); tracker.enabled = true; tracker.label = 'cat';
-  const box = { label: 'cat', confidence: 0.9, x: 400, y: 200, w: 80, h: 80 };
+  const box = { label: 'cat', confidence: 0.9, x: 400, y: 200, width: 80, height: 80 };
   expect(tracker.update([box], 640, 480, 301, false)).toEqual({ yaw: 0, pitch: 0 });
   expect(tracker.update([box], 640, 480, 10, true).yaw).toBe(0);
   expect(tracker.update([box], 640, 480, 10, false).yaw).toBeGreaterThan(0);

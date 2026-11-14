@@ -16,6 +16,8 @@ const tags = new TagHelper();
 const decoder = new PacketDecoder(), window = new FrameWindow();
 const classes = new Set([0, 15, 16]);
 let socket: Awaited<ReturnType<typeof connect>> | undefined, running = true;
+process.once('SIGINT', () => { running = false; });
+process.once('SIGTERM', () => { running = false; });
 
 async function jpeg(bgr: Uint8Array): Promise<Uint8Array> {
   const proc = Bun.spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", `${config.width}x${config.height}`, "-i", "pipe:0", "-frames:v", "1", "-q:v", String(Math.max(2, Math.round((100 - config.jpegQuality) / 8))), "-f", "image2", "-vcodec", "mjpeg", "pipe:1"], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });

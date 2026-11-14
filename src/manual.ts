@@ -46,5 +46,5 @@ export class Manual {
  }
  estop(){this.estopped=true;this.stop();this.pump.estop();for(const a of Object.values(this.axes))a.forceDisable();this.enabled=false;}
  resetEstop(){this.estopped=false;this.pump.resetEstop();}
- shutdown(){this.estop();this.io.close();}
+ shutdown(){this.estop();}
 }
