@@ -1,3 +1,5 @@
+import { boxSize, boxStyle, classIdsForTarget, matchDetectionsToFrame, parseJpegFrame, targetOptions, type DetectionPacket } from './protocol';
+
 type Control = Record<string, unknown>;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
@@ -6,6 +8,8 @@ const boxes = $('boxes');
 const send = (message: Control) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); };
 let peer: RTCPeerConnection | undefined, channel: RTCDataChannel | undefined;
 let lastSeq = -1, decoding = false, pending: ArrayBuffer | null = null;
+let currentFrame: { seq: number; timestamp: number } | undefined;
+const detections: DetectionPacket[] = [];
 let enabled = false, tracking = false, speed = 100;
 const held = new Set<string>();
 const keyMap: Record<string, string> = {arrowleft:'yaw:-1',a:'yaw:-1',arrowright:'yaw:1',d:'yaw:1',arrowup:'pitch:-1',w:'pitch:-1',arrowdown:'pitch:1',s:'pitch:1'};
@@ -18,9 +22,13 @@ const speedInput = $<HTMLInputElement>('speed');
 speedInput.oninput = () => { speed = Number(speedInput.value); $('speed-value').textContent = `${speed}%`; send({type:'speed',pct:speed}); };
 const pulseInput = $<HTMLInputElement>('pulse');
 pulseInput.oninput = () => { $('pulse-value').textContent = `${pulseInput.value} ms`; };
+const targetInput = $<HTMLInputElement>('target');
+const targetList = $<HTMLDataListElement>('targets');
+const aimXInput = $<HTMLInputElement>('aim-x'), aimYInput = $<HTMLInputElement>('aim-y');
+for (const option of targetOptions()) { const el=document.createElement('option'); el.value=option.value; el.label=option.label; targetList.append(el); }
 $('enable').onclick = () => send({type:'enable',on:!enabled});
 $('estop').onclick = () => { stopMotion(); stopWater(); send({type:'estop'}); };
-$('tracking').onclick = () => send({type:'tracking',on:!tracking,label:$<HTMLInputElement>('target').value,strategy:$<HTMLSelectElement>('strategy').value});
+$('tracking').onclick = () => send({type:'tracking',on:!tracking,label:targetInput.value,strategy:$<HTMLSelectElement>('strategy').value});
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-move]')) {
   const motion = button.dataset.move!;
   button.onpointerdown = event => { event.preventDefault(); button.setPointerCapture(event.pointerId); startMotion(motion); };
@@ -56,19 +64,32 @@ document.onkeyup = event => {
 };
 window.onblur = () => { stopMotion(); cancelWater(); send({type:'pump',on:false}); };
 window.onbeforeunload = () => { stopMotion(); send({type:'pump',on:false}); };
-for (const id of ['aim-x','aim-y']) $<HTMLInputElement>(id).oninput = () => { const x=Number($<HTMLInputElement>('aim-x').value)/100,y=Number($<HTMLInputElement>('aim-y').value)/100; $('aim').style.left=`${x*100}%`; $('aim').style.top=`${y*100}%`; send({type:'aim',x,y}); };
-$<HTMLInputElement>('target').onchange = () => send({type:'target',label:$<HTMLInputElement>('target').value});
+function setAim(x: number, y: number) { aimXInput.value=String(Math.round(x*100)); aimYInput.value=String(Math.round(y*100)); $('aim').style.left=`${x*100}%`; $('aim').style.top=`${y*100}%`; }
+for (const input of [aimXInput, aimYInput]) input.oninput = () => { const x=Number(aimXInput.value)/100,y=Number(aimYInput.value)/100; setAim(x,y); send({type:'aim',x,y}); };
+targetInput.onchange = () => { send({type:'target',label:targetInput.value}); send({type:'classes',ids:classIdsForTarget(targetInput.value)}); };
 $<HTMLSelectElement>('strategy').onchange = () => send({type:'strategy',value:$<HTMLSelectElement>('strategy').value});
+function renderDetections() {
+  boxes.replaceChildren();
+  if (!currentFrame) return;
+  const message = matchDetectionsToFrame(currentFrame, detections);
+  if (!message) return;
+  const width=message.width||640,height=message.height||480;
+  for (const box of message.boxes||[]) {
+    const size = boxSize(box); if (size.width <= 0 || size.height <= 0) continue;
+    const el=document.createElement('div'); el.className='box'; Object.assign(el.style, boxStyle(box,width,height));
+    const label=document.createElement('span');label.textContent=`${box.label} ${Math.round(box.confidence*100)}%`;el.append(label);boxes.append(el);
+  }
+}
 async function drawLatest() {
   if (decoding || !pending) return;
   decoding = true;
   const data = pending; pending = null;
   try {
-    const view = new DataView(data), seq = view.getUint32(0,true);
+    const frame = parseJpegFrame(data), seq = frame.seq;
     if (seq > lastSeq) {
-      const blob = new Blob([data.slice(12)],{type:'image/jpeg'});
+      const blob = new Blob([frame.jpeg],{type:'image/jpeg'});
       const bitmap = await createImageBitmap(blob);
-      if (seq > lastSeq) { context.drawImage(bitmap,0,0,canvas.width,canvas.height); lastSeq=seq; }
+      if (seq > lastSeq) { context.drawImage(bitmap,0,0,canvas.width,canvas.height); lastSeq=seq; currentFrame={seq,timestamp:frame.timestamp}; renderDetections(); }
       bitmap.close();
     }
   } catch (error) { $('error').textContent = String(error); }
@@ -92,10 +113,9 @@ ws.onmessage = async event => {
   else if (message.type === 'motorState') { enabled=Boolean(message.enabled); $('enable').textContent=enabled?'Disable':'Enable'; if (message.speed !== undefined) { speed=message.speed; speedInput.value=String(speed); $('speed-value').textContent=`${speed}%`; } if (message.error) $('error').textContent=message.error; }
   else if (message.type === 'pumpState') { $('pump-state').textContent=message.on?`Pump on${message.remainingMs?` ${message.remainingMs} ms`:''}`:'Pump off'; if (message.error) $('error').textContent=message.error; }
   else if (message.type === 'switches') $('switches').textContent=`Yaw − ${message.negative?'ON':'off'} / + ${message.positive?'ON':'off'}`;
-  else if (message.type === 'trackingState') { tracking=Boolean(message.enabled); $('tracking').textContent=tracking?'Tracking on':'Tracking off'; }
+  else if (message.type === 'trackingState') { tracking=Boolean(message.enabled); $('tracking').textContent=tracking?'Tracking on':'Tracking off'; if (message.aimX !== undefined && message.aimY !== undefined) setAim(Number(message.aimX),Number(message.aimY)); }
   else if (message.type === 'detections') {
-    boxes.replaceChildren(); const width=message.width||640,height=message.height||480;
-    for (const box of message.boxes||[]) { const el=document.createElement('div'); el.className='box'; el.style.left=`${box.x/width*100}%`;el.style.top=`${box.y/height*100}%`;el.style.width=`${box.w/width*100}%`;el.style.height=`${box.h/height*100}%`;const label=document.createElement('span');label.textContent=`${box.label} ${Math.round(box.confidence*100)}%`;el.append(label);boxes.append(el); }
+    detections.push(message); while (detections.length > 30) detections.shift(); renderDetections();
     if (message.fps!==undefined) $('fps').textContent=`FPS ${message.fps}`;
     if (message.dropped!==undefined) $('dropped').textContent=`Dropped ${message.dropped}`;
     if (message.timestamp!==undefined) $('latency').textContent=`Latency ${Math.max(0,Date.now()-message.timestamp)} ms`;
