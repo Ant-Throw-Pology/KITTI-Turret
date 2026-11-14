@@ -388,7 +388,7 @@ export async function main(): Promise<void> {
       return new Response('not found', { status: 404 });
     },
     websocket: {
-      open(ws) { clients.add(ws); peers.set(ws, new VideoPeer(m => ws.send(JSON.stringify(m)), process.env.KITTI_STUN)); state(ws); if (latestDetection) ws.send(JSON.stringify({ type: 'detections', ...latestDetection })); },
+      open(ws) { clients.add(ws); try { peers.set(ws, new VideoPeer(m => ws.send(JSON.stringify(m)), process.env.KITTI_STUN)); } catch (e) { console.warn('WebRTC unavailable:', e); } state(ws); if (latestDetection) ws.send(JSON.stringify({ type: 'detections', ...latestDetection })); },
       message(ws, m) { try { route(ws, String(m)); } catch (e) { ws.send(JSON.stringify({ type: 'error', error: String(e) })); } },
       close(ws) { clients.delete(ws); peers.get(ws)?.close(); peers.delete(ws); if (clients.size === 0) safeStop(); },
     },
