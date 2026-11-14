@@ -1,0 +1,255 @@
+export const DEFAULT_MAX_JPEG_BYTES = 32 * 1024 * 1024;
+
+export function jpegQualityToQ(quality: number): number {
+  if (!Number.isFinite(quality)) throw new Error("JPEG quality must be finite");
+  return Math.max(2, Math.round((100 - quality) / 8));
+}
+
+function findMarker(bytes: Uint8Array, marker: number, from: number): number {
+  for (let index = Math.max(0, from); index + 1 < bytes.byteLength; index++) {
+    if (bytes[index] === 0xff && bytes[index + 1] === marker) return index;
+  }
+  return -1;
+}
+
+export class JpegStreamParser {
+  private buffer = new Uint8Array(0);
+  private inFrame = false;
+  private scanOffset = 0;
+
+  constructor(private readonly maxFrameBytes = DEFAULT_MAX_JPEG_BYTES) {
+    if (!Number.isInteger(maxFrameBytes) || maxFrameBytes < 4) throw new Error("invalid maximum JPEG size");
+  }
+
+  push(chunk: Uint8Array): Uint8Array[] {
+    if (chunk.byteLength === 0) return [];
+    if (this.buffer.byteLength === 0) {
+      this.buffer = chunk.slice();
+    } else {
+      const joined = new Uint8Array(this.buffer.byteLength + chunk.byteLength);
+      joined.set(this.buffer);
+      joined.set(chunk, this.buffer.byteLength);
+      this.buffer = joined;
+    }
+
+    const frames: Uint8Array[] = [];
+    let position = 0;
+    try {
+      while (position < this.buffer.byteLength) {
+        if (!this.inFrame) {
+          const soi = findMarker(this.buffer, 0xd8, position);
+          if (soi < 0) {
+            position = Math.max(position, this.buffer.byteLength - 1);
+            break;
+          }
+          position = soi;
+          this.inFrame = true;
+          this.scanOffset = position + 2;
+        }
+
+        const eoi = findMarker(this.buffer, 0xd9, this.scanOffset);
+        if (eoi < 0) {
+          this.scanOffset = Math.max(this.scanOffset, this.buffer.byteLength - 1);
+          if (this.buffer.byteLength - position > this.maxFrameBytes) {
+            throw new Error(`JPEG frame exceeds ${this.maxFrameBytes} bytes`);
+          }
+          break;
+        }
+
+        const end = eoi + 2;
+        if (end - position > this.maxFrameBytes) throw new Error(`JPEG frame exceeds ${this.maxFrameBytes} bytes`);
+        frames.push(this.buffer.slice(position, end));
+        position = end;
+        this.inFrame = false;
+        this.scanOffset = position;
+      }
+    } catch (error) {
+      this.buffer = new Uint8Array(0);
+      this.inFrame = false;
+      this.scanOffset = 0;
+      throw error;
+    }
+
+    if (position > 0) {
+      this.buffer = this.buffer.slice(position);
+      this.scanOffset = this.inFrame ? Math.max(2, this.scanOffset - position) : 0;
+    }
+    return frames;
+  }
+}
+
+export interface EncoderSink {
+  write(data: Uint8Array): number | Promise<number>;
+  flush?(): number | Promise<number>;
+  end?(error?: Error): number | Promise<number>;
+}
+
+export interface EncoderProcess {
+  readonly stdin: EncoderSink;
+  readonly stdout: ReadableStream<Uint8Array>;
+  readonly exited: Promise<number>;
+  kill(signal?: NodeJS.Signals | number): void;
+}
+
+export type EncoderSpawn = (command: string[]) => EncoderProcess;
+
+export interface JpegEncoderOptions {
+  width: number;
+  height: number;
+  quality: number;
+  ffmpeg?: string;
+  maxFrameBytes?: number;
+}
+
+type Pending = { resolve: (jpeg: Uint8Array) => void; reject: (error: Error) => void };
+
+function drainPipe(stream: ReadableStream<Uint8Array> | number | null): void {
+  if (!stream || typeof stream === "number") return;
+  const reader = stream.getReader();
+  async function drain() {
+    try { while (true) { const { done } = await reader.read(); if (done) break; } }
+    catch { /* pipe closed */ }
+    finally { try { reader.releaseLock(); } catch { /* already released */ } }
+  }
+  void drain();
+}
+
+function defaultSpawn(command: string[]): EncoderProcess {
+  const proc = Bun.spawn(command, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  if (!proc.stdin || typeof proc.stdin === "number") throw new Error("JPEG encoder stdin unavailable");
+  if (!proc.stdout || typeof proc.stdout === "number") throw new Error("JPEG encoder stdout unavailable");
+  drainPipe(proc.stderr);
+  return proc as unknown as EncoderProcess;
+}
+
+export class JpegEncoder {
+  private readonly parser: JpegStreamParser;
+  private readonly frameBytes: number;
+  private readonly command: string[];
+  private proc?: EncoderProcess;
+  private pending?: Pending;
+  private failure?: Error;
+  private closed = false;
+  private stopping?: Promise<void>;
+
+  constructor(private readonly options: JpegEncoderOptions, private readonly spawn: EncoderSpawn = defaultSpawn) {
+    const { width, height, quality } = options;
+    if (!Number.isInteger(width) || width < 1 || !Number.isInteger(height) || height < 1) {
+      throw new Error("invalid JPEG encoder dimensions");
+    }
+    this.frameBytes = width * height * 3;
+    this.parser = new JpegStreamParser(options.maxFrameBytes);
+    this.command = [
+      options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error",
+      "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", `${width}x${height}`, "-i", "pipe:0",
+      "-q:v", String(jpegQualityToQ(quality)), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ];
+  }
+
+  start(): void {
+    if (this.closed) throw new Error("JPEG encoder is stopped");
+    if (this.proc) throw new Error("JPEG encoder already started");
+    const proc = this.spawn(this.command);
+    this.proc = proc;
+    void this.read(proc);
+    void proc.exited.then(
+      code => this.handleExit(proc, code),
+      error => { if (this.proc === proc && !this.closed) this.fail(error); },
+    );
+  }
+
+  encode(bgr: Uint8Array): Promise<Uint8Array> {
+    if (this.closed) return Promise.reject(new Error("JPEG encoder is stopped"));
+    if (!this.proc) return Promise.reject(new Error("JPEG encoder is not started"));
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.pending) return Promise.reject(new Error("JPEG encoder busy: another frame is being encoded"));
+    if (bgr.byteLength !== this.frameBytes) {
+      return Promise.reject(new Error(`JPEG encoder expected ${this.frameBytes} BGR bytes, got ${bgr.byteLength}`));
+    }
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const pending: Pending = { resolve, reject };
+      this.pending = pending;
+      try {
+        const written = this.proc!.stdin.write(bgr);
+        if (written instanceof Promise) {
+          void written.then(
+            count => { if (this.pending === pending && count !== bgr.byteLength) this.fail(new Error("JPEG encoder short input write")); },
+            error => { if (this.pending === pending) this.fail(error); },
+          );
+        } else if (written !== bgr.byteLength) {
+          this.fail(new Error("JPEG encoder short input write"));
+        }
+      } catch (error) {
+        if (this.pending === pending) this.fail(error);
+      }
+    });
+  }
+
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.closed = true;
+    const proc = this.proc;
+    this.proc = undefined;
+    const failure = this.failure ?? new Error("JPEG encoder stopped");
+    this.failure = failure;
+    this.rejectPending(failure);
+    if (!proc) return Promise.resolve();
+
+    try {
+      const ended = proc.stdin.end?.();
+      if (ended instanceof Promise) void ended.catch(() => undefined);
+    } catch { /* stdin already closed */ }
+    try { proc.kill("SIGTERM"); } catch { /* process already exited */ }
+
+    this.stopping = Promise.race([
+      proc.exited.then(() => undefined, () => undefined),
+      Bun.sleep(1000),
+    ]).then(() => { this.stopping = undefined; });
+    return this.stopping;
+  }
+
+  private async read(proc: EncoderProcess): Promise<void> {
+    const reader = proc.stdout.getReader();
+    try {
+      while (!this.closed) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const frames = this.parser.push(value);
+        for (const frame of frames) this.settle(frame);
+      }
+    } catch (error) {
+      if (!this.closed && this.proc === proc) this.fail(error);
+    } finally {
+      try { reader.releaseLock(); } catch { /* already released */ }
+    }
+    if (!this.closed && this.proc === proc && !this.failure) this.fail(new Error("JPEG encoder stdout closed"));
+  }
+
+  private settle(frame: Uint8Array): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = undefined;
+    pending.resolve(frame);
+  }
+
+  private rejectPending(error: Error): void {
+    const pending = this.pending;
+    this.pending = undefined;
+    pending?.reject(error);
+  }
+
+  private fail(error: unknown): void {
+    if (this.closed) return;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    if (!this.failure) this.failure = failure;
+    this.rejectPending(this.failure);
+    const proc = this.proc;
+    if (proc) { try { proc.kill("SIGTERM"); } catch { /* process already exited */ } }
+  }
+
+  private handleExit(proc: EncoderProcess, code: number): void {
+    if (this.proc !== proc || this.closed) return;
+    this.fail(new Error(`JPEG encoder exited with code ${code}`));
+  }
+}

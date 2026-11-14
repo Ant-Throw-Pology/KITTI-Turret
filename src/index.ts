@@ -1,6 +1,6 @@
 import { createServer, Socket } from 'node:net';
 import { existsSync, unlinkSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { loadConfig } from './config';
 import { PacketDecoder, PacketType, encodePacket } from './ipc';
 import { MockGpio, Gpiod } from './gpio';
@@ -240,6 +240,10 @@ function liveSocket(path: string): Promise<boolean> {
 }
 
 export async function main(): Promise<void> {
+  const ROOT = resolve(dirname(Bun.main), '..');
+  const indexHtmlPath = resolve(ROOT, 'src/web/index.html');
+  const styleCssPath = resolve(ROOT, 'src/web/style.css');
+  const clientJsPath = resolve(ROOT, 'dist/client.js');
   const cfg = loadConfig();
   const mockMode = process.env.KITTI_MOCK === '1';
   const io = mockMode ? new MockGpio() : cfg.relayActiveHigh !== null || cfg.yawNegativeSwitch !== null ? new Gpiod() : null;
@@ -382,9 +386,9 @@ export async function main(): Promise<void> {
       const path = new URL(req.url).pathname;
       if (path === '/ws') return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
       if (path === '/estop' && req.method === 'POST') { estop(); return new Response('ok'); }
-      if (path === '/') return new Response(Bun.file('src/web/index.html'), { headers: { 'content-type': 'text/html' } });
-      if (path === '/dist/client.js') return new Response(Bun.file('dist/client.js'), { headers: { 'content-type': 'text/javascript;charset=utf-8' } });
-      if (path === '/dist/style.css') return new Response(Bun.file('src/web/style.css'), { headers: { 'content-type': 'text/css;charset=utf-8' } });
+      if (path === '/') return new Response(Bun.file(indexHtmlPath), { headers: { 'content-type': 'text/html' } });
+      if (path === '/dist/client.js') return new Response(Bun.file(clientJsPath), { headers: { 'content-type': 'text/javascript;charset=utf-8' } });
+      if (path === '/dist/style.css') return new Response(Bun.file(styleCssPath), { headers: { 'content-type': 'text/css;charset=utf-8' } });
       return new Response('not found', { status: 404 });
     },
     websocket: {

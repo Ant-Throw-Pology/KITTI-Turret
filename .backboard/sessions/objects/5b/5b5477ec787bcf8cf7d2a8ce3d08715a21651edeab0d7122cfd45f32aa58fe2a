@@ -1,0 +1,40 @@
+# Adversarial review (2026-11-14)
+
+This is a source review. No Pi hardware, browser session, or WebRTC peer was available. Findings below are unresolved unless a later integration commit explicitly closes them.
+
+## Resolved in the current worktree
+
+- **Worker supervision.** `src/supervisor.ts` now spawns the worker, restarts it repeatedly after unexpected exits until stop/e-stop, watches startup and frame progress, escalates TERM to KILL for a stuck process group, and latches ownership after a stop timeout so a stuck process cannot overlap a new RKNN context. Shutdown awaits the supervisor before closing the server.
+- **Shared GPIO lifetime.** Configured axes are force-disabled at startup and again during e-stop/shutdown. `Manual.shutdown()` no longer closes the shared GPIO handle; the pump relay receives its final off write before `io.close()`.
+- **Video header contract.** `src/index.ts` forwards the complete worker payload including the 12-byte sequence/timestamp header that `src/web/client.tsx` parses.
+- **Client/server control whitelist.** The server accepts `aim`, `target`, and `strategy`, and the client error handler accepts both `error` and `message`.
+- **Build/deploy outputs.** `package.json` builds the stable files `index.js`, `worker.js`, `tag_worker.js`, `npu_smoke.js`, `gpio_read.js`, and `client.js`, and copies HTML, CSS, and the AprilTag C shim. `deploy/` and `bun.lock` are present.
+
+## Stop-ship findings
+
+1. **The actual pump and motor control path is not verified.** Hardware initialization, libgpiod ABI behavior, relay polarity, and limit assignment have not been measured on the Pi. There is no physical emergency-stop input. The local tests use mocks.
+2. **Worker recovery is incomplete.** The supervisor can kill and restart the process group, but `src/worker.ts` still has no reconnect after an IPC close, and `src/index.ts` does not clear stale detection state or stop forwarding the last video frame when the worker dies. AprilTag helper grandchildren are not independently supervised.
+3. **The manual and tracking safety contracts are incomplete.** `src/index.ts` toggles tracker state, but nothing calls `tracker.update` or commands motor velocity. It never pauses tracking for a pressed switch, stale frame, or lost target. `src/index.ts` accepts a manual `motor` command from any viewer; there is no owner lease or control-link watchdog. A viewer that stays connected but stops sending commands can leave motion running until the 57,600-step cap. Motion stops only when the last viewer disconnects.
+4. **Detected classes are not dynamically synchronized.** `src/worker.ts` has baseline IDs `{0,15,16}` and accepts a `classes` control packet that clears them. `src/index.ts` never sends class updates. The target input is free text and no class ID selection contract is implemented. AprilTag ID selection is also absent.
+
+## Other concrete defects
+
+- `src/worker.ts` calls `window.flush` only after producing another frame. An ACK that arrives after the last frame does not trigger queued-frame flush. Detection packets are written without a queue cap or ACK flow control. A slow IPC reader can therefore accumulate writes outside the two-frame window.
+- `src/index.ts` broadcasts a separate `frame` packet for every frame but does not match or hold detections by sequence. The browser renders latest detections over whichever decoded frame happens to be current; the required 300 ms matching window is missing.
+- `src/index.ts` uses `readFileSync` on each HTTP request. This is synchronous disk I/O on the serving process. It also exposes `/estop` without authentication or origin checks; any local webpage may cause an e-stop, and the same WebSocket has no control access policy.
+- `src/index.ts` probes and unlinks the IPC socket, but the probe has no timeout and can hang on a connecting socket. The cleanup path unlinks without confirming the socket inode still belongs to this process.
+- `src/manual.ts` immediately blocks a move toward an already pressed switch, as desired, but the grace check for moving away uses `moved` outside the inner 32-step callback. The callback therefore allows up to one 32-step batch beyond the configured grace. This needs a Pi test and clearer bound.
+- `src/stepper.ts` increments the logical position after a pulse even if an e-stop drove EN high during the awaited pulse width. The exact physical position after a mid-pulse e-stop cannot be claimed. The 10 µs busy wait uses JavaScript scheduling and needs pulse-width measurement on target.
+- `src/gpio.ts` binds opaque libgpiod v2 signatures, including the `size_t` argument for `gpiod_line_config_add_line_settings`. The supplied `GPIO1_B6`/`GPIO1_B7` reads exercised the target libgpiod input binding and chip mapping for those two lines. Output writes, relay polarity, other pins, and the C header ABI remain unverified. `Gpiod` opens one chip handle per bank but requests each line separately, so writes are not batched.
+- `src/web/client.tsx` paints every received detection immediately with no 300 ms age limit. It does not clear stale boxes on worker loss. `window.onblur` sends pump off, but a lost network connection before the server sees the packet relies on the last-viewer close callback, with no control watchdog.
+- The JPEG encoder in `src/worker.ts` spawns one ffmpeg process per frame. At 18–20 FPS this may be expensive and can create subprocess pressure. Its process group is not detached or supervised, and output buffering/performance have not been measured.
+- Pump timeout is unit tested, but tap, hold, key repeat, and pointer capture have not been exercised in a browser. No pump timing measurements exist on the Pi.
+
+## Evidence
+
+- `bun check`: no type errors in 33 files.
+- `bun test`: 27 passing, 1 skipped by default (28 tests across 5 files).
+- `KITTI_TEST_SOCKET=1 bun test test/soak.test.ts`: 2 passing.
+- `bun run build`: emitted the six stable JavaScript entry points plus HTML, CSS, and the AprilTag C shim.
+- Supplied Pi observations: one FP16 inference returned 705,600 elements / 1,411,200 bytes; 100 runs averaged 55.6 ms (min 45.0, max 210.2); `GPIO1_B6`/`GPIO1_B7` read false; the AprilTag shim compiled against Debian 3.4.2 and blank frame sequence 7 returned no boxes.
+- The 11,000-run NPU inference soak completed successfully: average 56.9 ms (min 43.1, max 254.3), approximately 625.9 seconds total, stable output at 705,600 elements / 1,411,200 bytes, seven 1,500-run recycle boundaries, exit zero, and no PID lock afterward. Final `thermal_zone0` was 36,076 millidegrees C; mid-run at about 2:05 elapsed, RSS was 101,344 KiB at 34,230 millidegrees C. This is not the required one-hour full-stack soak.

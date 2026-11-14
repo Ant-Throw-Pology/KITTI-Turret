@@ -1,0 +1,418 @@
+import { createServer, Socket } from 'node:net';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { loadConfig } from './config';
+import { PacketDecoder, PacketType, encodePacket } from './ipc';
+import { MockGpio, Gpiod } from './gpio';
+import { Stepper, MOTOR_PINS } from './stepper';
+import { Pump, MockRelay, GpioRelay } from './pump';
+import { Manual, type Axis } from './manual';
+import { VideoPeer } from './webrtc';
+import { Tracker, chooseTarget, type Box } from './tracking';
+import { WorkerSupervisor } from './supervisor';
+
+export const DEFAULT_CLASS_IDS: readonly number[] = [0, 15, 16];
+export const TRACK_LIMITS = {
+  staleMs: 300,
+  tickMs: 50,
+  broadcastMs: 100,
+  yawMaxRate: 1600,
+  pitchMaxRate: 1000,
+  yawBaseRate: 1920,
+  pitchBaseRate: 1280,
+  yawAccel: 3840,
+  pitchAccel: 2560,
+  minPct: 10,
+  maxPct: 60,
+  restartPct: 8,
+};
+
+export type TrackPause = 'disabled' | 'motors-disabled' | 'stale-frame' | 'target-lost' | 'yaw-limit' | null;
+
+export interface TrackSample { boxes: Box[]; width: number; height: number; timestamp: number }
+
+/** The subset of Manual used by tracking. Kept structural so tests need no GPIO. */
+export interface TrackMotion {
+  readonly enabled: boolean;
+  readonly estopped: boolean;
+  speed(pct: number): void;
+  start(axis: Axis, dir: 1 | -1, slow?: boolean): Promise<void>;
+  stop(axis?: Axis): void;
+  switches(): { negative: boolean; positive: boolean };
+}
+
+export type TrackSnapshot = {
+  enabled: boolean;
+  active: boolean;
+  paused: TrackPause;
+  yaw: number;
+  pitch: number;
+  speedPct: number;
+  error?: string;
+};
+
+function approach(current: number, target: number, maxDelta: number): number {
+  if (target > current) return Math.min(target, current + maxDelta);
+  return Math.max(target, current - maxDelta);
+}
+
+/**
+ * Converts fresh detections into bounded motor velocity. The controller never
+ * moves on stale frames, a lost target, or a pressed yaw limit, and every
+ * re-issued Manual.start() is speed-limited by TRACK_LIMITS.
+ */
+export class TrackController {
+  readonly tracker = new Tracker();
+  enabled = false;
+  private latest?: TrackSample;
+  private sampledAt = 0;
+  private lastTick = 0;
+  private paused: TrackPause = 'disabled';
+  private rates: Record<Axis, number> = { yaw: 0, pitch: 0 };
+  private tokens: Record<Axis, number> = { yaw: 0, pitch: 0 };
+  private active: Partial<Record<Axis, { dir: 1 | -1; pct: number; token: number }>> = {};
+  private pending = new Set<Axis>();
+  private lastSpeed = 0;
+  private error?: string;
+
+  constructor(private readonly motion: TrackMotion, private readonly limits = TRACK_LIMITS) {}
+
+  sample(sample: TrackSample, at = Date.now()): void {
+    this.latest = { ...sample, boxes: [...sample.boxes] };
+    this.sampledAt = at;
+  }
+
+  enable(on: boolean): void {
+    if (this.enabled === on) return;
+    this.enabled = on;
+    this.tracker.enabled = on;
+    this.lastTick = 0;
+    if (!on) this.stopAll();
+  }
+
+  stopAll(): void {
+    for (const axis of ['yaw', 'pitch'] as const) this.stopAxis(axis);
+    this.rates = { yaw: 0, pitch: 0 };
+    this.lastSpeed = 0;
+  }
+
+  snapshot(): TrackSnapshot {
+    return {
+      enabled: this.enabled,
+      active: Boolean(this.active.yaw || this.active.pitch),
+      paused: this.paused,
+      yaw: this.effectiveRate('yaw'),
+      pitch: this.effectiveRate('pitch'),
+      speedPct: this.lastSpeed,
+      error: this.error,
+    };
+  }
+
+  private stopAxis(axis: Axis): void {
+    this.tokens[axis]++;
+    delete this.active[axis];
+    this.rates[axis] = 0;
+    try { this.motion.stop(axis); } catch { /* controller is already gone */ }
+  }
+
+  private effectiveRate(axis: Axis): number {
+    const live = this.active[axis];
+    if (!live) return 0;
+    const base = axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate;
+    return live.dir * base * live.pct / 100;
+  }
+
+  private begin(axis: Axis, dir: 1 | -1, pct: number): void {
+    if (this.pending.has(axis)) return;
+    this.error = undefined;
+    const token = ++this.tokens[axis];
+    this.active[axis] = { dir, pct, token };
+    this.pending.add(axis);
+    void this.motion.start(axis, dir, false).catch((error: unknown) => {
+      this.error = String(error);
+    }).finally(() => {
+      this.pending.delete(axis);
+      const live = this.active[axis];
+      if (live?.token === token) {
+        delete this.active[axis];
+        this.rates[axis] = 0;
+      }
+    });
+  }
+
+  tick(now = Date.now()): TrackSnapshot {
+    const elapsed = this.lastTick ? Math.max(0, Math.min(0.25, (now - this.lastTick) / 1000)) : 0;
+    this.lastTick = now;
+    const pause = (reason: TrackPause): TrackSnapshot => {
+      this.paused = reason;
+      this.stopAll();
+      return this.snapshot();
+    };
+
+    if (!this.enabled) return pause('disabled');
+    if (!this.motion.enabled) return pause('motors-disabled');
+    if (this.motion.estopped) return pause('motors-disabled');
+    const sample = this.latest;
+    if (!sample || now - this.sampledAt > this.limits.staleMs || now - sample.timestamp > this.limits.staleMs) return pause('stale-frame');
+
+    let switches = { negative: false, positive: false };
+    try { switches = this.motion.switches(); }
+    catch { switches = { negative: true, positive: true }; }
+    const yawLimit = switches.negative || switches.positive;
+    if (!chooseTarget(sample.boxes, this.tracker.label, this.tracker.strategy)) return pause('target-lost');
+
+    const velocity = this.tracker.update(sample.boxes, sample.width, sample.height, Math.max(0, now - sample.timestamp), yawLimit);
+    this.paused = yawLimit ? 'yaw-limit' : null;
+
+    const wanted: Record<Axis, number> = {
+      yaw: yawLimit ? 0 : velocity.yaw,
+      pitch: velocity.pitch,
+    };
+    const accel: Record<Axis, number> = { yaw: this.limits.yawAccel, pitch: this.limits.pitchAccel };
+    const maxRate: Record<Axis, number> = {
+      yaw: Math.min(this.limits.yawMaxRate, this.limits.yawBaseRate * this.limits.maxPct / 100),
+      pitch: Math.min(this.limits.pitchMaxRate, this.limits.pitchBaseRate * this.limits.maxPct / 100),
+    };
+    for (const axis of ['yaw', 'pitch'] as const) {
+      const goal = Math.max(-maxRate[axis], Math.min(maxRate[axis], wanted[axis]));
+      this.rates[axis] = approach(this.rates[axis], goal, accel[axis] * elapsed);
+      const base = axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate;
+      if (Math.abs(this.rates[axis]) < base * this.limits.minPct / 100) this.rates[axis] = 0;
+    }
+    // A pressed yaw limit is a hard stop, not a deceleration ramp.
+    if (yawLimit) this.rates.yaw = 0;
+
+    const pctFor = (axis: Axis) => {
+      const base = axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate;
+      return Math.abs(this.rates[axis]) / base * 100;
+    };
+    const speedPct = Math.min(this.limits.maxPct, Math.max(pctFor('yaw'), pctFor('pitch')));
+
+    if (speedPct === 0) {
+      for (const axis of ['yaw', 'pitch'] as const) if (this.active[axis]) this.stopAxis(axis);
+      this.lastSpeed = 0;
+      return this.snapshot();
+    }
+    this.lastSpeed = Math.max(this.limits.minPct, Math.round(speedPct));
+
+    for (const axis of ['yaw', 'pitch'] as const) {
+      const rate = this.rates[axis];
+      const live = this.active[axis];
+      if (rate === 0) {
+        if (live) this.stopAxis(axis);
+        continue;
+      }
+      const dir: 1 | -1 = rate > 0 ? 1 : -1;
+      // Manual.speed is shared by both axes, so every move uses the global bucket.
+      const pct = this.lastSpeed;
+      if (!live) this.begin(axis, dir, pct);
+      else if (live.dir !== dir || Math.abs(live.pct - pct) >= this.limits.restartPct) this.stopAxis(axis);
+    }
+    return this.snapshot();
+  }
+}
+
+export function normalizeClassIds(ids: unknown): number[] {
+  if (!Array.isArray(ids) || ids.length > 80) throw new Error('classes must be an array of up to 80 YOLO class ids');
+  const normalized = new Set<number>();
+  for (const id of ids) {
+    if (!Number.isInteger(id) || id < 0 || id > 79) throw new Error('class ids must be integers 0..79');
+    normalized.add(id);
+  }
+  return [...normalized].sort((a, b) => a - b);
+}
+
+function liveSocket(path: string): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = new Socket();
+    let settled = false;
+    const done = (live: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(live);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    socket.setTimeout(500, () => done(false));
+    socket.connect(path);
+  });
+}
+
+export async function main(): Promise<void> {
+  const cfg = loadConfig();
+  const mockMode = process.env.KITTI_MOCK === '1';
+  const io = mockMode ? new MockGpio() : cfg.relayActiveHigh !== null || cfg.yawNegativeSwitch !== null ? new Gpiod() : null;
+  const pumpReady = mockMode || cfg.relayActiveHigh !== null;
+  const clients = new Set<any>();
+  const peers = new Map<any, VideoPeer>();
+  const broadcast = (v: unknown) => { for (const c of clients) c.send(JSON.stringify(v)); };
+  const pump = new Pump(io && cfg.relayActiveHigh !== null ? new GpioRelay(io, 'GPIO1_C6', cfg.relayActiveHigh) : new MockRelay(),
+    { minPulseMs: 50, maxPulseMs: 2000, maxContinuousMs: cfg.maxPumpMs },
+    (on, remainingMs, error) => broadcast({ type: 'pumpState', on, remainingMs, error }));
+  const axes = io ? { yaw: new Stepper(io, MOTOR_PINS.yaw), pitch: new Stepper(io, MOTOR_PINS.pitch) } : null;
+  if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); }
+  const manual = io && axes && cfg.yawNegativeSwitch ? new Manual(axes, pump, io,
+    { negative: cfg.yawNegativeSwitch as 'GPIO1_B6' | 'GPIO1_B7', positive: cfg.yawNegativeSwitch === 'GPIO1_B6' ? 'GPIO1_B7' : 'GPIO1_B6', graceSteps: 64, backoffSteps: 128, backoffRate: 960, maxBackoffSteps: 2400 }) : null;
+  const noMotion: TrackMotion = {
+    enabled: false, estopped: true,
+    speed() { /* no hardware */ },
+    async start() { /* no hardware */ },
+    stop() { /* no hardware */ },
+    switches() { return { negative: false, positive: false }; },
+  };
+  const track = new TrackController(manual ?? noMotion);
+  let worker: Socket | null = null;
+  let latestDetection: any = null;
+  let classIds = [...DEFAULT_CLASS_IDS];
+  const sendClasses = (socket: Socket | null) => {
+    if (!socket) return;
+    socket.write(encodePacket(PacketType.Control, new TextEncoder().encode(JSON.stringify({ type: 'classes', ids: classIds }))));
+  };
+  const workerEntry = join(dirname(Bun.main), Bun.main.endsWith('.js') ? 'worker.js' : 'worker.ts');
+  const supervisor = cfg.model && process.env.KITTI_EXTERNAL_WORKER !== '1' ? new WorkerSupervisor({
+    spawn: () => Bun.spawn([process.execPath, workerEntry], { detached: true, stdin: 'ignore', stdout: 'ignore', stderr: 'inherit', env: process.env }),
+    onEvent: (event, detail) => console.log(`worker ${event}`, detail ?? ''),
+  }) : null;
+
+  const trackingState = () => ({
+    type: 'trackingState',
+    label: track.tracker.label,
+    strategy: track.tracker.strategy,
+    aimX: track.tracker.aimX,
+    aimY: track.tracker.aimY,
+    ...track.snapshot(),
+  });
+  function safeStop() { pump.stop(); track.enable(false); manual?.stop(); manual?.enable(false); }
+  function estop() {
+    track.enable(false); manual?.estop(); pump.estop(); worker?.destroy(); void supervisor?.stop();
+    broadcast({ type: 'motorState', enabled: false, moving: false, speed: manual?.speedPct ?? 100, error: 'E-stop' });
+    broadcast(trackingState());
+  }
+  function state(ws: any) {
+    ws.send(JSON.stringify({ type: 'motorState', enabled: manual?.enabled ?? false, moving: false, speed: manual?.speedPct ?? 100 }));
+    ws.send(JSON.stringify({ type: 'pumpState', on: pump.on, remainingMs: pump.remainingMs, error: pump.error }));
+    ws.send(JSON.stringify({ type: 'classState', ids: classIds }));
+    ws.send(JSON.stringify(trackingState()));
+    ws.send(JSON.stringify({ type: 'workerState', connected: worker !== null, supervised: supervisor !== null }));
+  }
+  function route(ws: any, raw: string) {
+    const m = JSON.parse(raw); if (!m || typeof m.type !== 'string') throw Error('invalid message');
+    switch (m.type) {
+      case 'ping': ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() })); break;
+      case 'offer': case 'ice': void peers.get(ws)?.signal(m).catch((e: unknown) => ws.send(JSON.stringify({ type: 'error', error: String(e) }))); break;
+      case 'estop': estop(); break;
+      case 'enable': if (typeof m.on !== 'boolean') throw Error('invalid enable'); if (!manual) throw Error('hardware unavailable'); if (!m.on) track.enable(false); manual.enable(m.on); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); broadcast(trackingState()); break;
+      case 'speed': if (typeof m.pct !== 'number' || !manual) throw Error('invalid speed'); manual.speed(m.pct); broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct }); break;
+      case 'motor': if (!manual || !['yaw', 'pitch'].includes(m.axis) || ![-1, 1].includes(m.dir) || typeof m.on !== 'boolean') throw Error('invalid motor'); track.enable(false); if (m.on) void manual.start(m.axis, m.dir, !!m.slow).catch((e: unknown) => broadcast({ type: 'motorState', enabled: manual.enabled, moving: false, speed: manual.speedPct, error: String(e) })); else manual.stop(m.axis); broadcast({ type: 'motorState', enabled: manual.enabled, moving: m.on, speed: manual.speedPct }); broadcast(trackingState()); break;
+      case 'pump': if (typeof m.on !== 'boolean' || (m.durationMs !== undefined && typeof m.durationMs !== 'number')) throw Error('invalid pump'); if (m.on) { if (!pumpReady) throw Error('pump relay polarity is not configured'); pump.start(m.durationMs); } else pump.stop(); break;
+      case 'tracking': if (typeof m.on !== 'boolean') throw Error('invalid tracking'); if (m.on && !manual?.enabled) throw Error('enable motors first'); if (typeof m.label === 'string') track.tracker.label = m.label; if (['confidence', 'area', 'confidence + area'].includes(m.strategy)) track.tracker.strategy = m.strategy; if (typeof m.aimX === 'number' && m.aimX >= 0 && m.aimX <= 1) track.tracker.aimX = m.aimX; if (typeof m.aimY === 'number' && m.aimY >= 0 && m.aimY <= 1) track.tracker.aimY = m.aimY; track.enable(m.on); broadcast(trackingState()); break;
+      case 'aim': if (typeof m.x !== 'number' || typeof m.y !== 'number' || m.x < 0 || m.x > 1 || m.y < 0 || m.y > 1) throw Error('invalid aim'); track.tracker.aimX = m.x; track.tracker.aimY = m.y; break;
+      case 'target': if (typeof m.label !== 'string') throw Error('invalid target'); track.tracker.label = m.label; break;
+      case 'strategy': if (!['confidence', 'area', 'confidence + area'].includes(m.value)) throw Error('invalid strategy'); track.tracker.strategy = m.value; break;
+      case 'classes': classIds = normalizeClassIds(m.ids); sendClasses(worker); broadcast({ type: 'classState', ids: classIds }); break;
+      default: throw Error(`unknown control type ${m.type}`);
+    }
+  }
+
+  if (existsSync(cfg.socket)) {
+    if (await liveSocket(cfg.socket)) throw Error(`live IPC socket: ${cfg.socket}`);
+    unlinkSync(cfg.socket);
+  }
+  const ipc = createServer(socket => {
+    if (worker) { socket.destroy(); return; }
+    worker = socket;
+    sendClasses(socket);
+    broadcast({ type: 'workerState', connected: true, supervised: supervisor !== null });
+    const decoder = new PacketDecoder();
+    socket.on('data', chunk => {
+      try {
+        for (const p of decoder.push(Buffer.from(chunk))) {
+          if (p.type === PacketType.Frame) {
+            if (p.payload.length < 12) throw Error('short frame');
+            const view = new DataView(p.payload.buffer, p.payload.byteOffset);
+            const seq = view.getUint32(0, true);
+            const timestamp = Number(view.getBigUint64(4, true));
+            supervisor?.noteFrame();
+            for (const peer of peers.values()) peer.sendFrame(p.payload);
+            socket.write(encodePacket(PacketType.Ack, p.payload.slice(0, 4)));
+            broadcast({ type: 'frame', seq, timestamp });
+          } else if (p.type === PacketType.Detection) {
+            latestDetection = JSON.parse(new TextDecoder().decode(p.payload));
+            const detection = latestDetection as { sequence?: number; timestamp?: number; width?: number; height?: number; boxes?: Box[] };
+            if (typeof detection.timestamp === 'number' && typeof detection.width === 'number' && typeof detection.height === 'number' && Array.isArray(detection.boxes)) {
+              track.sample({ boxes: detection.boxes, width: detection.width, height: detection.height, timestamp: detection.timestamp });
+            }
+            broadcast({ type: 'detections', ...latestDetection, seq: latestDetection.sequence });
+          } else throw Error(`unexpected packet ${p.type}`);
+        }
+      } catch (e) { console.error(e); socket.destroy(); }
+    });
+    socket.on('close', () => {
+      if (worker !== socket) return;
+      worker = null;
+      latestDetection = null;
+      broadcast({ type: 'workerState', connected: false, supervised: supervisor !== null });
+    });
+  });
+  ipc.listen(cfg.socket);
+  supervisor?.start();
+
+  let lastTrackBroadcast = 0;
+  let lastTrackError: string | undefined;
+  const trackingTimer = setInterval(() => {
+    if (!track.enabled) return;
+    const snapshot = track.tick();
+    const now = Date.now();
+    if (clients.size && now - lastTrackBroadcast >= TRACK_LIMITS.broadcastMs) {
+      lastTrackBroadcast = now;
+      broadcast(trackingState());
+    }
+    if (snapshot.error && snapshot.error !== lastTrackError) console.error('tracking', snapshot.error);
+    lastTrackError = snapshot.error;
+  }, TRACK_LIMITS.tickMs);
+  const switchTimer = manual ? setInterval(() => {
+    if (clients.size === 0) return;
+    try { broadcast({ type: 'switches', ...manual.switches() }); } catch { /* ignore a failed read */ }
+  }, 250) : null;
+
+  const server = Bun.serve({
+    hostname: cfg.host, port: cfg.port,
+    fetch(req, s) {
+      const path = new URL(req.url).pathname;
+      if (path === '/ws') return s.upgrade(req) ? undefined : new Response('upgrade failed', { status: 400 });
+      if (path === '/estop' && req.method === 'POST') { estop(); return new Response('ok'); }
+      if (path === '/') return new Response(readFileSync('dist/index.html'), { headers: { 'content-type': 'text/html' } });
+      if (path === '/dist/client.js') return new Response(readFileSync('dist/client.js'), { headers: { 'content-type': 'application/javascript' } });
+      if (path === '/dist/style.css') return new Response(readFileSync('dist/style.css'), { headers: { 'content-type': 'text/css' } });
+      return new Response('not found', { status: 404 });
+    },
+    websocket: {
+      open(ws) { clients.add(ws); peers.set(ws, new VideoPeer(m => ws.send(JSON.stringify(m)), process.env.KITTI_STUN)); state(ws); if (latestDetection) ws.send(JSON.stringify({ type: 'detections', ...latestDetection })); },
+      message(ws, m) { try { route(ws, String(m)); } catch (e) { ws.send(JSON.stringify({ type: 'error', error: String(e) })); } },
+      close(ws) { clients.delete(ws); peers.get(ws)?.close(); peers.delete(ws); if (clients.size === 0) safeStop(); },
+    },
+  });
+  console.log(`KITTI ${server.url}`);
+  let shuttingDown = false;
+  async function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(trackingTimer);
+    if (switchTimer) clearInterval(switchTimer);
+    safeStop();
+    manual?.shutdown();
+    pump.close();
+    io?.close();
+    for (const p of peers.values()) p.close();
+    worker?.destroy();
+    await supervisor?.stop();
+    ipc.close();
+    server.stop(true);
+    if (existsSync(cfg.socket)) unlinkSync(cfg.socket);
+  }
+  process.once('SIGINT', () => void shutdown());
+  process.once('SIGTERM', () => void shutdown());
+}
+
+if (import.meta.main) await main().catch((error: unknown) => { console.error(error); process.exit(1); });

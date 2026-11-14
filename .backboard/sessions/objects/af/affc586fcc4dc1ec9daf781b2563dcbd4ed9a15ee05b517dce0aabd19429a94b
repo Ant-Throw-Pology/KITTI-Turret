@@ -1,0 +1,14 @@
+{
+  "name": "kitti-turret",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "bun check",
+    "test": "bun test",
+    "build": "rm -rf dist && mkdir -p dist && bun build src/index.ts --target=bun --outfile=dist/index.js && bun build src/worker.ts --target=bun --outfile=dist/worker.js && bun build src/tag_worker.ts --target=bun --outfile=dist/tag_worker.js && bun build scripts/offline.ts --target=bun --outfile=dist/offline.js && bun build scripts/npu_smoke.ts --target=bun --outfile=dist/npu_smoke.js && bun build scripts/gpio_read.ts --target=bun --outfile=dist/gpio_read.js && bun build src/web/client.tsx --target=browser --outfile=dist/client.js && cp src/web/index.html src/web/style.css src/apriltag_ffi.c dist/"
+  },
+  "dependencies": { "node-datachannel": "0.33.6" },
+  "devDependencies": { "@types/bun": "1.3.14", "typescript": "5.9.3" }
+}
