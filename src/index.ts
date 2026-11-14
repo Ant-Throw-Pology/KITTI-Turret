@@ -748,17 +748,31 @@ export async function main(): Promise<void> {
       }, 250)
     : null;
 
+  const trustedOrigin = process.env.KITTI_TRUSTED_ORIGIN;
+  function allowedOrigin(req: Request): boolean {
+    const origin = req.headers.get("Origin");
+    if (!origin) return true;
+    if (trustedOrigin && origin === trustedOrigin) return true;
+    try {
+      const host = req.headers.get("Host") ?? cfg.host;
+      return origin === `http://${host}`;
+    } catch { return false; }
+  }
+
   const server = Bun.serve({
     routes: { "/": indexHtml },
     hostname: cfg.host,
     port: cfg.port,
     fetch(req, s) {
       const path = new URL(req.url).pathname;
-      if (path === "/ws")
+      if (path === "/ws") {
+        if (!allowedOrigin(req)) return new Response("forbidden", { status: 403 });
         return s.upgrade(req)
           ? undefined
           : new Response("upgrade failed", { status: 400 });
+      }
       if (path === "/estop" && req.method === "POST") {
+        if (!allowedOrigin(req)) return new Response("forbidden", { status: 403 });
         estop();
         return new Response("ok");
       }
