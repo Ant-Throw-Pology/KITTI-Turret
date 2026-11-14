@@ -5,7 +5,7 @@ import type { Int8StrideInput } from "../src/yolo";
 import { buildTagFramePacket, grayscale } from "../src/tag_worker";
 import { NpuLock, packRknnInput, readRknnOutput, RKNN_FP16_OUTPUT_BYTES, RKNN_INPUT_SIZE, RKNN_OUTPUT_SIZE, RKNN_TENSOR_NHWC, RKNN_TENSOR_UINT8 } from "../src/rknn";
 import { APRILTAG_CLASS_ID_OFFSET, apriltagClassId, parseTagResultLine } from "../src/apriltag";
-import { existsSync } from "node:fs");
+import { existsSync } from "node:fs";
 
 test("letterbox swaps BGR and centers aspect ratio", () => {
   const image = letterbox(new Uint8Array([1, 2, 3, 4, 5, 6]), 2, 1, 4);
