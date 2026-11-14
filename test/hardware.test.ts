@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test';
 import { MockGpio, parsePin, type DigitalIo, type Pin } from '../src/gpio';
 import { GpioRelay, MockRelay, Pump } from '../src/pump';
-import { Stepper, MOTOR_PINS } from '../src/stepper';
+import { Stepper, MOTOR_PINS, DEFAULT_MOTION, motionConfig } from '../src/stepper';
 import { Manual } from '../src/manual';
 
 class RecordingGpio implements DigitalIo {
@@ -104,4 +104,8 @@ test('step cap', async () => {
   const m = new Stepper(io, MOTOR_PINS.yaw, { maxRate: 1000, acceleration: 10000, pulseUs: 10, maxSteps: 2 });
   m.enable();
   expect(m.move(1, 3, 100)).rejects.toThrow();
+});
+
+test('configured step cap preserves safe motion defaults', () => {
+  expect(motionConfig(123)).toEqual({ ...DEFAULT_MOTION, maxSteps: 123 });
 });
