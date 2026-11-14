@@ -202,8 +202,7 @@ export class TrackController {
         continue;
       }
       const dir: 1 | -1 = rate > 0 ? 1 : -1;
-      // Manual.speed is shared by both axes, so every move uses the global bucket.
-      const pct = this.lastSpeed;
+      const pct = Math.max(this.limits.minPct, Math.min(this.limits.maxPct, Math.abs(rate) / (axis === 'yaw' ? this.limits.yawBaseRate : this.limits.pitchBaseRate) * 100));
       if (!live) this.begin(axis, dir, pct);
       else if (live.dir !== dir || Math.abs(live.pct - pct) >= this.limits.restartPct) this.stopAxis(axis);
     }
