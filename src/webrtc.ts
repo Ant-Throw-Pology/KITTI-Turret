@@ -6,8 +6,9 @@ export class VideoPeer {
   private dc: any;
   private ready: Promise<void>;
   private closed = false;
+  private unavailable?: unknown;
   constructor(private readonly sendSignal: (message: Signal) => void, private readonly stun = '', private readonly loadRtc: () => Promise<RtcModule> = () => import('node-datachannel') as Promise<RtcModule>) {
-    this.ready = this.initialize();
+    this.ready = this.initialize().catch((error: unknown) => { this.unavailable = error; });
   }
   private async initialize(): Promise<void> {
     const rtc = await this.loadRtc();
@@ -23,6 +24,7 @@ export class VideoPeer {
   }
   async signal(message: Signal): Promise<void> {
     await this.ready;
+    if (this.unavailable) throw new Error(`WebRTC unavailable: ${String(this.unavailable)}`);
     if (this.closed || !this.pc) return;
     if (message.type === 'offer' && message.sdp) this.pc.setRemoteDescription(message.sdp, 'Offer');
     else if (message.type === 'ice' && message.candidate && message.mid !== undefined) this.pc.addRemoteCandidate(message.candidate, message.mid);
