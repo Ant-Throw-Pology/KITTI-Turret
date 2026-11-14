@@ -318,10 +318,17 @@ function isLoopbackOrigin(origin: string): boolean {
   return false;
 }
 
-/** Checks if a Host header refers to a loopback address (with optional port). */
+/** Checks if a Host header refers to a loopback address (with optional port).
+ *  Handles IPv6 [::1] correctly: finds the closing bracket before port. */
 function isLoopbackHost(host: string): boolean {
-  const colon = host.indexOf(':');
-  const h = colon >= 0 ? host.slice(0, colon) : host;
+  let h: string;
+  if (host.startsWith('[')) {
+    const close = host.indexOf(']');
+    h = close >= 0 ? host.slice(0, close + 1) : host;
+  } else {
+    const colon = host.indexOf(':');
+    h = colon >= 0 ? host.slice(0, colon) : host;
+  }
   return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
 }
 
