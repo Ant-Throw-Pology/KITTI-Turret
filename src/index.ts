@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { loadConfig } from './config';
 import { PacketDecoder, PacketType, encodePacket } from './ipc';
 import { MockGpio, Gpiod } from './gpio';
-import { Stepper, MOTOR_PINS } from './stepper';
+import { Stepper, MOTOR_PINS, motionConfig } from './stepper';
 import { Pump, MockRelay, GpioRelay } from './pump';
 import { Manual, type Axis } from './manual';
 import { VideoPeer } from './webrtc';
@@ -253,7 +253,8 @@ export async function main(): Promise<void> {
   const pump = new Pump(io && cfg.relayActiveHigh !== null ? new GpioRelay(io, 'GPIO1_C6', cfg.relayActiveHigh) : new MockRelay(),
     { minPulseMs: 50, maxPulseMs: 2000, maxContinuousMs: cfg.maxPumpMs },
     (on, remainingMs, error) => broadcast({ type: 'pumpState', on, remainingMs, error }));
-  const axes = io ? { yaw: new Stepper(io, MOTOR_PINS.yaw), pitch: new Stepper(io, MOTOR_PINS.pitch) } : null;
+  const motion = motionConfig(cfg.maxSteps);
+  const axes = io ? { yaw: new Stepper(io, MOTOR_PINS.yaw, motion), pitch: new Stepper(io, MOTOR_PINS.pitch, motion) } : null;
   if (axes) { axes.yaw.forceDisable(); axes.pitch.forceDisable(); }
   const manual = io && axes && cfg.yawNegativeSwitch ? new Manual(axes, pump, io,
     { negative: cfg.yawNegativeSwitch as 'GPIO1_B6' | 'GPIO1_B7', positive: cfg.yawNegativeSwitch === 'GPIO1_B6' ? 'GPIO1_B7' : 'GPIO1_B6', graceSteps: 64, backoffSteps: 128, backoffRate: 960, maxBackoffSteps: 2400 }) : null;
