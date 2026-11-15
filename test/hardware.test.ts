@@ -390,6 +390,35 @@ test('yaw invert flips raw direction from logical dir', async () => {
   inverted.enable(false);
 });
 
+test('speed setting scales the move rate over one continuous move', async () => {
+  const io = new MockGpio();
+  const calls: Array<{ rate: number; steps: number }> = [];
+  const fakeStepper: any = {
+    cfg: { maxSteps: 57600 },
+    cancel() {},
+    enable() {},
+    forceDisable() {},
+    async move(_dir: number, steps: number, rate: number) { calls.push({ rate, steps }); return 0; },
+  };
+  const pump = new Pump(new MockRelay());
+  const manual = new Manual({ yaw: fakeStepper, pitch: new Stepper(io, MOTOR_PINS.pitch) }, pump, io);
+  manual.enable(true);
+
+  manual.speed(50);
+  await manual.start('yaw', 1).catch(() => {});
+  // One continuous move with the full step budget, so the trapezoidal ramp
+  // can reach the requested cruise rate instead of resetting every 32 steps.
+  expect(calls.length).toBe(1);
+  expect(calls[0]!.steps).toBe(57600);
+  const rate50 = calls[0]!.rate;
+
+  calls.length = 0;
+  manual.speed(200);
+  await manual.start('yaw', 1).catch(() => {});
+  expect(calls[0]!.rate / rate50).toBeCloseTo(4);
+  manual.enable(false);
+});
+
 test('yaw invert also inverts backoff direction', async () => {
   const io = new MockGpio();
   const yawRawDirs: number[] = [];

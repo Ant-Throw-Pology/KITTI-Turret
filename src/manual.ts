@@ -28,21 +28,23 @@ export class Manual {
   const pct=overridePct??this.speedPct;
   const rate=base*pct/100*(slow?.25:1);
   const task=(async()=>{
-   let moved=0;
    const atStart=axis==='yaw'?this.switches():undefined;
    // Limit-switch end semantics derive from the logical requested dir, not effectiveDir.
    // Only raw Stepper.move directions (normal and backoff) are multiplied by inversion sign.
    const blocking=dir<0?'negative':'positive';
    const opposite=dir<0?'positive':'negative';
-   while(id===this.generation[axis]&&moved<motor.cfg.maxSteps&&this.enabled&&!this.estopped){
-    if(axis==='yaw'){
-     const now=this.switches();
-     if(now[blocking])break;
-     if(now[opposite]&&moved>=this.limits.graceSteps&&atStart?.[opposite])break;
-    }
-    const n=await motor.move(effectiveDir,Math.min(32,motor.cfg.maxSteps-moved),rate,axis==='yaw'?()=>{const sw=this.switches();return sw[blocking]||(moved>=this.limits.graceSteps&&!!atStart?.[opposite]&&sw[opposite]);}:undefined);
-    moved+=n;if(n===0)break;
-   }
+   // Run ONE continuous move so the trapezoidal ramp spans the whole motion and
+   // actually reaches the requested cruise rate. Chunking the move reset the
+   // ramp every 32 steps, which capped the achieved speed regardless of the
+   // speed setting. The limit switch is polled every 16 steps instead.
+   let stepped=0;
+   const shouldStop=axis==='yaw'?()=>{
+    stepped++;
+    if((stepped&15)!==0)return false;
+    const sw=this.switches();
+    return sw[blocking]||(stepped>=this.limits.graceSteps&&!!atStart?.[opposite]&&sw[opposite]);
+   }:undefined;
+   await motor.move(effectiveDir,motor.cfg.maxSteps,rate,shouldStop);
    if(axis==='yaw'&&id===this.generation[axis]&&this.enabled&&!this.estopped){
     const now=this.switches();
     const hit=now[blocking]&&!atStart?.[blocking];
