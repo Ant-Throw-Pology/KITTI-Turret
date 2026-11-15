@@ -17,8 +17,15 @@ const tags = new TagHelper();
 const decoder = new PacketDecoder(), window = new FrameWindow();
 const classes = new Set([0, 15, 16]);
 let socket: Awaited<ReturnType<typeof connect>> | undefined, running = true;
-process.once('SIGINT', () => { running = false; });
-process.once('SIGTERM', () => { running = false; });
+function cleanup() {
+  if (!running) return;
+  running = false;
+  try { camera.stop(); } catch {}
+  try { encoder?.stop(); } catch {}
+  try { socket?.end(); } catch {}
+}
+process.once('SIGINT', cleanup);
+process.once('SIGTERM', cleanup);
 
 let encoder: JpegEncoder | undefined;
 
