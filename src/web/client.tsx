@@ -58,7 +58,7 @@ function App() {
   const [speed, setSpeed] = useState(100);
   const [pulseMs, setPulseMs] = useState(500);
   const pulseMsRef = useRef(500);
-  const [target, setTarget] = useState('All classes');
+  const [target, setTarget] = useState('person');
   const [strategy, setStrategy] = useState('confidence + area');
   const [aimX, setAimX] = useState(0.5);
   const [aimY, setAimY] = useState(0.5);

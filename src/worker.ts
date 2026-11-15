@@ -5,6 +5,7 @@ import { PacketDecoder, PacketType, FrameWindow, encodePacket } from "./ipc";
 import { letterbox } from "./preprocess";
 import { RknnModel, NpuLock } from "./rknn";
 import { decodeDetect6 } from "./yolo";
+import { YOLO_LABELS } from "./web/protocol";
 import { TagHelper } from "./apriltag";
 import { JpegStreamParser, PerFrameJpegEncoder } from "./encoder";
 
@@ -95,7 +96,7 @@ async function runInferenceLoop(): Promise<void> {
     let detected: unknown[] = [];
     try {
       const result = letterbox(frame.bgr, frame.width, frame.height);
-      detected = decodeDetect6(await model!.infer(result.rgb), result, classes);
+      detected = decodeDetect6(await model!.infer(result.rgb), result, classes, 0.4, 0.45, YOLO_LABELS);
     } catch (error) { if (frame.sequence % 30 === 1) console.error("inference failed:", error); }
     const detection = new TextEncoder().encode(JSON.stringify({ sequence: frame.sequence, timestamp: frame.capturedAt, width: frame.width, height: frame.height, boxes: detected, dropped: camera.dropped + window.dropped }));
     socket!.write(encodePacket(PacketType.Detection, detection));

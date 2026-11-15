@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { letterbox } from "../src/preprocess";
-import { decodeFp16, fp16Table, nms } from "../src/yolo";
+import { decodeFp16, decodeDetect6, fp16Table, nms } from "../src/yolo";
 import { grayscale } from "../src/tag_worker";
 import { NpuLock } from "../src/rknn";
 import { existsSync } from "node:fs";
@@ -29,4 +29,22 @@ test("NPU lock rejects a second owner and releases", () => {
   try { first.acquire(); expect(() => second.acquire()).toThrow(/live PID/); }
   finally { first.release(); }
   expect(existsSync(path)).toBe(false);
+});
+
+test("decodeDetect6 sigmoid-activates logits and emits class-name labels", () => {
+  // One stride-32 cell (grid 0,0) with a positive person logit; all others negative.
+  const mk = (n: number) => new Float32Array(n).fill(-20);
+  const box8 = mk(4 * 80 * 80), cls8 = mk(80 * 80 * 80);
+  const box16 = mk(4 * 40 * 40), cls16 = mk(80 * 40 * 40);
+  const box32 = mk(4 * 20 * 20), cls32 = mk(80 * 20 * 20);
+  cls32[0] = 1.5; // class 0, cell 0 -> sigmoid(1.5) = 0.82
+  // box tensor is channel-major [4,20,20]: channel c lives at c*area + cell
+  box32[0] = 1; box32[400] = 1; box32[800] = 1; box32[1200] = 1;
+  const meta = { rgb: new Uint8Array(0), scale: 1, padX: 0, padY: 0, sourceWidth: 640, sourceHeight: 640 };
+  const labels = ["person", "bicycle", "car"];
+  const dets = decodeDetect6([box8, cls8, box16, cls16, box32, cls32], meta, new Set([0, 15, 16]), 0.4, 0.45, labels);
+  expect(dets.length).toBe(1);
+  expect(dets[0]!.label).toBe("person");
+  expect(dets[0]!.confidence).toBeGreaterThan(0.8);
+  expect(dets[0]!.confidence).toBeLessThan(0.9);
 });
