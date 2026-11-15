@@ -37,6 +37,9 @@ export class RknnModel {
   private context = new Uint8Array(8);
   private model?: Uint8Array;
   private runs = 0;
+  /** Number of model outputs. YOLO26 RKNN exports use 6 (3 scales x box+cls);
+   *  older exports use a single (1,84,8400) tensor. */
+  outputCount = 6;
   private get native(): Record<string, (...args: any[]) => number> {
     // Bun's dlopen return type erases symbol signatures when retained in a class field.
     return this.lib.symbols as unknown as Record<string, (...args: any[]) => number>;
@@ -63,7 +66,7 @@ export class RknnModel {
     if (rc !== 0) throw new Error(`rknn_init failed: ${rc}`);
     this.runs = 0;
   }
-  async infer(rgb: Uint8Array): Promise<Uint16Array> {
+  async infer(rgb: Uint8Array): Promise<Float32Array[]> {
     if (rgb.length !== 640 * 640 * 3 || this.ctx() === 0n) throw new Error("invalid RKNN input or unopened model");
     // rknn_input: uint32 index; void* buf; uint32 size; uint8 pass_through; enum type; enum fmt.
     const input = new Uint8Array(32), iv = new DataView(input.buffer);
@@ -74,17 +77,26 @@ export class RknnModel {
     if (rc !== 0) throw new Error(`rknn_inputs_set failed: ${rc}`);
     rc = this.native.rknn_run!(this.ctx(), null);
     if (rc !== 0) throw new Error(`rknn_run failed: ${rc}`);
-    const output = new Uint8Array(24), ov = new DataView(output.buffer);
-    rc = this.native.rknn_outputs_get!(this.ctx(), 1, ptr(output), null);
+    // Request all 6 outputs as float32 (rknn_output: want_float u8, is_prealloc u8, index u32, buf ptr, size u32).
+    const outputs = new Uint8Array(24 * this.outputCount), ov = new DataView(outputs.buffer);
+    for (let i = 0; i < this.outputCount; i++) {
+      outputs[i * 24 + 0] = 1; // want_float
+      ov.setUint32(i * 24 + 4, i, true);
+    }
+    rc = this.native.rknn_outputs_get!(this.ctx(), this.outputCount, ptr(outputs), null);
     if (rc !== 0) throw new Error(`rknn_outputs_get failed: ${rc}`);
     try {
-      const size = ov.getUint32(16, true), native = ov.getBigUint64(8, true);
-      if (size !== 84 * 8400 * 2 || native === 0n) throw new Error(`unsupported RKNN output size: ${size}`);
-      const copy = new Uint8Array(size);
-      this.memory.memcpy!(ptr(copy), native, size);
-      return new Uint16Array(copy.buffer);
+      const result: Float32Array[] = [];
+      for (let i = 0; i < this.outputCount; i++) {
+        const size = ov.getUint32(i * 24 + 16, true), native = ov.getBigUint64(i * 24 + 8, true);
+        if (native === 0n || size === 0) throw new Error(`empty RKNN output ${i}`);
+        const bytes = new Uint8Array(size);
+        this.memory.memcpy!(ptr(bytes), native, size);
+        result.push(new Float32Array(bytes.buffer));
+      }
+      return result;
     } finally {
-      this.native.rknn_outputs_release!(this.ctx(), 1, ptr(output));
+      this.native.rknn_outputs_release!(this.ctx(), this.outputCount, ptr(outputs));
       if (++this.runs >= this.recycleEvery) { this.close(); await this.open(); }
     }
   }

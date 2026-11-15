@@ -90,10 +90,12 @@ test('stable keyboard: empty deps, refs for enabled/pulseMs, blur listener', () 
   expect(source).toContain("key === 'f'");
 });
 
-test('missing peer handling in signaling route returns clear error', () => {
+test('signaling route advertises WebSocket video fallback when WebRTC is disabled', () => {
   const source = readFileSync('src/index.ts', 'utf8');
-  expect(source).toContain('const peer = peers.get(ws);');
-  expect(source).toContain('"WebRTC peer not initialized"');
+  const client = readFileSync('src/web/client.tsx', 'utf8');
+  expect(source).toContain('KITTI_ENABLE_WEBRTC');
+  expect(source).toContain('type: "videoTransport", websocket: true, webrtc: false');
+  expect(client).toContain('event.data instanceof ArrayBuffer');
 });
 
 test('client source echoes sliders only from explicit server fields', () => {

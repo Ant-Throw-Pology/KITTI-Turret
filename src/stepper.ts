@@ -2,7 +2,7 @@ import type {DigitalIo,Pin} from './gpio';
 export interface AxisPins {step:Pin;dir:Pin;en:Pin}
 export const MOTOR_PINS:Record<'yaw'|'pitch',AxisPins>={yaw:{step:'GPIO4_A3',dir:'GPIO4_A4',en:'GPIO0_D4'},pitch:{step:'GPIO4_B2',dir:'GPIO4_B3',en:'GPIO1_D3'}};
 export interface MotionConfig {maxRate:number; acceleration:number; pulseUs:number; maxSteps:number}
-export const DEFAULT_MOTION:MotionConfig={maxRate:4000,acceleration:16000,pulseUs:10,maxSteps:57600};
+export const DEFAULT_MOTION:MotionConfig={maxRate:16000,acceleration:16000,pulseUs:10,maxSteps:57600};
 export class Stepper {
  position=0; enabled=false; moving=false;
  private bound=false; private cancelled=false; private generation=0;

@@ -31,6 +31,7 @@ function connectWebSocket(handlers: {
 }) {
   cleanupWs();
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
   wsReconnectAttempts++;
   ws.onopen = () => {
     wsReconnectAttempts = 0;
@@ -57,7 +58,7 @@ function App() {
   const [speed, setSpeed] = useState(100);
   const [pulseMs, setPulseMs] = useState(500);
   const pulseMsRef = useRef(500);
-  const [target, setTarget] = useState('');
+  const [target, setTarget] = useState('All classes');
   const [strategy, setStrategy] = useState('confidence + area');
   const [aimX, setAimX] = useState(0.5);
   const [aimY, setAimY] = useState(0.5);
@@ -124,9 +125,21 @@ function App() {
   // WebSocket connection lifecycle
   useEffect(() => {
     connectWebSocket({
-      onopen: () => { connectPeer().catch((e) => setError(String(e))); send({ type: 'ping' }); },
+      onopen: () => { connectPeer().catch((e) => setError(String(e))); send({ type: 'ping' }); send({ type: 'target', label: target }); send({ type: 'classes', ids: classIdsForTarget(target) }); },
       onclose: () => { stopMotion(); cancelWater(); peerRef.current?.close(); setError('Connection lost'); },
       onmessage: (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          pendingRef.current = event.data;
+          if (!decodingRef.current) void drawLatest();
+          return;
+        }
+        if (event.data instanceof Blob) {
+          void event.data.arrayBuffer().then((data) => {
+            pendingRef.current = data;
+            if (!decodingRef.current) void drawLatest();
+          });
+          return;
+        }
         let msg: any;
         try { msg = JSON.parse(event.data); } catch { return; }
         if (msg.type === 'motorState') {
@@ -144,6 +157,10 @@ function App() {
           if (msg.aimX !== undefined && msg.aimY !== undefined) { setAimX(Number(msg.aimX)); setAimY(Number(msg.aimY)); }
         } else if (msg.type === 'detections') {
           setDetectionPackets(prev => { const next = [...prev, msg]; while (next.length > 30) next.shift(); return next; });
+          if (msg.fps !== undefined) setFps(`FPS ${msg.fps}`);
+          if (msg.dropped !== undefined) setDropped(`Dropped ${msg.dropped}`);
+          if (msg.timestamp !== undefined) setLatency(`Latency ${Math.max(0, Date.now() - msg.timestamp)} ms`);
+        } else if (msg.type === 'frame') {
           if (msg.fps !== undefined) setFps(`FPS ${msg.fps}`);
           if (msg.dropped !== undefined) setDropped(`Dropped ${msg.dropped}`);
           if (msg.timestamp !== undefined) setLatency(`Latency ${Math.max(0, Date.now() - msg.timestamp)} ms`);
@@ -208,6 +225,7 @@ function App() {
           if (ctx) { ctx.drawImage(bitmap, 0, 0, canvasRef.current.width, canvasRef.current.height); }
           lastSeqRef.current = frame.seq;
           setCurrentFrame({ seq: frame.seq, timestamp: frame.timestamp });
+          setLatency(`Latency ${Math.max(0, Date.now() - frame.timestamp)} ms`);
         }
         bitmap.close();
       }

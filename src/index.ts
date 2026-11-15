@@ -3,11 +3,10 @@ import { existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config";
 import { PacketDecoder, PacketType, encodePacket } from "./ipc";
-import { MockGpio, Gpiod } from "./gpio";
+import { MockGpio, Gpiod, type DigitalIo } from "./gpio";
 import { Stepper, MOTOR_PINS, DEFAULT_MOTION } from "./stepper";
 import { Pump, MockRelay, GpioRelay } from "./pump";
 import { Manual, type Axis } from "./manual";
-import { VideoPeer } from "./webrtc";
 import { Tracker, chooseTarget, type Box } from "./tracking";
 import { WorkerSupervisor } from "./supervisor";
 import {
@@ -18,6 +17,12 @@ import {
 import indexHtml from "./web/index.html";
 
 export const DEFAULT_CLASS_IDS: readonly number[] = [0, 15, 16];
+type VideoPeerLike = {
+  signal(message: { type: string; sdp?: string; candidate?: string; mid?: string }): Promise<void>;
+  sendFrame(jpeg: Uint8Array): boolean;
+  close(): void;
+};
+
 export const TRACK_LIMITS = {
   staleMs: 300,
   tickMs: 50,
@@ -324,14 +329,34 @@ function liveSocket(path: string): Promise<boolean> {
 export async function main(): Promise<void> {
   const cfg = loadConfig();
   const mockMode = process.env.KITTI_MOCK === "1";
-  const io = mockMode
-    ? new MockGpio()
-    : cfg.relayActiveHigh !== null || cfg.yawNegativeSwitch !== null
-      ? new Gpiod()
-      : null;
+  let io: DigitalIo
+  try {
+    io = mockMode
+      ? new MockGpio()
+      : cfg.relayActiveHigh !== null || cfg.yawNegativeSwitch !== null
+        ? new Gpiod()
+        : new MockGpio();
+  } catch {
+    console.warn("GPIO unavailable, falling back to mock");
+    io = new MockGpio();
+  }
   const pumpReady = mockMode || cfg.relayActiveHigh !== null;
+  const webrtcEnabled = process.env.KITTI_ENABLE_WEBRTC === "1";
   const clients = new Set<any>();
-  const peers = new Map<any, VideoPeer>();
+  const peers = new Map<any, VideoPeerLike>();
+  const frameTimes: number[] = [];
+  let lastFrameSeq = 0;
+  let inferredDropped = 0;
+  function frameMetrics(seq: number, timestamp: number) {
+    const now = Date.now();
+    if (lastFrameSeq && seq > lastFrameSeq + 1) inferredDropped += seq - lastFrameSeq - 1;
+    lastFrameSeq = Math.max(lastFrameSeq, seq);
+    frameTimes.push(now);
+    while (frameTimes.length > 30 || (frameTimes[0] !== undefined && now - frameTimes[0] > 2_000)) frameTimes.shift();
+    const elapsed = frameTimes.length > 1 ? frameTimes[frameTimes.length - 1]! - frameTimes[0]! : 0;
+    const fps = elapsed > 0 ? Math.round(((frameTimes.length - 1) * 1000 / elapsed) * 10) / 10 : 0;
+    return { type: "frame", seq, timestamp, fps, dropped: inferredDropped };
+  }
   const broadcast = (v: unknown) => {
     const json = JSON.stringify(v);
     for (const c of clients) {
@@ -342,6 +367,18 @@ export async function main(): Promise<void> {
       }
     }
   };
+  async function ensurePeer(ws: any): Promise<VideoPeerLike> {
+    const existing = peers.get(ws);
+    if (existing) return existing;
+    if (!webrtcEnabled) throw new Error("WebRTC disabled; using WebSocket video fallback");
+    const { VideoPeer } = await import("./webrtc");
+    const peer = new VideoPeer(
+      (m) => ws.send(JSON.stringify(m)),
+      process.env.KITTI_STUN,
+    );
+    peers.set(ws, peer);
+    return peer;
+  }
   const PING_TIMEOUT_MS = cfg.pingTimeoutMs;
   const lastActivity = new Map<any, number>();
   const cleanupConn = (ws: any) => {
@@ -358,32 +395,40 @@ export async function main(): Promise<void> {
     (on, remainingMs, error) =>
       broadcast({ type: "pumpState", on, remainingMs, error }),
   );
-  const axes = io
-    ? {
-        yaw: new Stepper(io, MOTOR_PINS.yaw, {
-          ...DEFAULT_MOTION,
-          maxSteps: cfg.maxSteps,
-        }),
-        pitch: new Stepper(io, MOTOR_PINS.pitch, {
-          ...DEFAULT_MOTION,
-          maxSteps: cfg.maxSteps,
-        }),
-      }
-    : null;
-  if (axes) {
-    axes.yaw.forceDisable();
-    axes.pitch.forceDisable();
+  let axes: Record<Axis, Stepper> | null = null;
+  try {
+    axes = io
+      ? {
+          yaw: new Stepper(io, MOTOR_PINS.yaw, {
+            ...DEFAULT_MOTION,
+            maxSteps: cfg.maxSteps,
+          }),
+          pitch: new Stepper(io, MOTOR_PINS.pitch, {
+            ...DEFAULT_MOTION,
+            maxSteps: cfg.maxSteps,
+          }),
+        }
+      : null;
+    if (axes) {
+      axes.yaw.forceDisable();
+      axes.pitch.forceDisable();
+    }
+  } catch (e) {
+    console.warn("GPIO init failed for axes, falling back to mock:", e);
+    io = new MockGpio();
+    axes = null;
   }
+  const yawSwitch = cfg.yawNegativeSwitch ?? (mockMode ? "GPIO1_B6" : null);
   const manual =
-    io && axes && cfg.yawNegativeSwitch
+    io && axes && yawSwitch
       ? new Manual(
           axes,
           pump,
           io,
           {
-            negative: cfg.yawNegativeSwitch as "GPIO1_B6" | "GPIO1_B7",
+            negative: yawSwitch as "GPIO1_B6" | "GPIO1_B7",
             positive:
-              cfg.yawNegativeSwitch === "GPIO1_B6" ? "GPIO1_B7" : "GPIO1_B6",
+              yawSwitch === "GPIO1_B6" ? "GPIO1_B7" : "GPIO1_B6",
             graceSteps: 64,
             backoffSteps: 128,
             backoffRate: 960,
@@ -425,7 +470,7 @@ export async function main(): Promise<void> {
   };
   const workerEntry = join(dirname(Bun.main), "worker.js");
   const supervisor =
-    cfg.model && process.env.KITTI_EXTERNAL_WORKER !== "1"
+    process.env.KITTI_EXTERNAL_WORKER !== "1"
       ? new WorkerSupervisor({
           spawn: () =>
             Bun.spawn([process.execPath, workerEntry], {
@@ -507,6 +552,7 @@ export async function main(): Promise<void> {
         supervised: supervisor !== null,
       }),
     );
+    ws.send(JSON.stringify({ type: "videoTransport", websocket: true, webrtc: webrtcEnabled }));
   }
   function route(ws: any, raw: string) {
     const m = JSON.parse(raw);
@@ -518,18 +564,12 @@ export async function main(): Promise<void> {
       case "offer":
       case "ice":
         {
-          const peer = peers.get(ws);
-          if (!peer) {
-            ws.send(
-              JSON.stringify({
-                type: "error",
-                error: "WebRTC peer not initialized",
-              }),
-            );
+          if (!webrtcEnabled) {
+            ws.send(JSON.stringify({ type: "videoTransport", websocket: true, webrtc: false }));
             break;
           }
-          void peer
-            .signal(m)
+          void ensurePeer(ws)
+            .then((peer) => peer.signal(m))
             .catch((e: unknown) =>
               ws.send(JSON.stringify({ type: "error", error: String(e) })),
             );
@@ -562,8 +602,8 @@ export async function main(): Promise<void> {
         });
         break;
       case "motor":
+        if (!manual) throw Error("hardware unavailable");
         if (
-          !manual ||
           !["yaw", "pitch"].includes(m.axis) ||
           ![-1, 1].includes(m.dir) ||
           typeof m.on !== "boolean"
@@ -673,8 +713,11 @@ export async function main(): Promise<void> {
             const timestamp = Number(view.getBigUint64(4, true));
             supervisor?.noteFrame();
             for (const peer of peers.values()) peer.sendFrame(p.payload);
+            for (const c of clients) {
+              try { c.send(p.payload); } catch { clients.delete(c); }
+            }
             socket.write(encodePacket(PacketType.Ack, p.payload.slice(0, 4)));
-            broadcast({ type: "frame", seq, timestamp });
+            broadcast(frameMetrics(seq, timestamp));
           } else if (p.type === PacketType.Detection) {
             latestDetection = JSON.parse(new TextDecoder().decode(p.payload));
             const detection = latestDetection as {
@@ -720,7 +763,10 @@ export async function main(): Promise<void> {
       });
     });
   });
-  ipc.listen(cfg.socket);
+  await new Promise<void>((resolve, reject) => {
+    ipc.listen(cfg.socket, () => resolve());
+    ipc.once("error", reject);
+  });
   supervisor?.start();
 
   let lastTrackBroadcast = 0;
@@ -768,17 +814,6 @@ export async function main(): Promise<void> {
       open(ws) {
         clients.add(ws);
         lastActivity.set(ws, Date.now());
-        try {
-          peers.set(
-            ws,
-            new VideoPeer(
-              (m) => ws.send(JSON.stringify(m)),
-              process.env.KITTI_STUN,
-            ),
-          );
-        } catch (e) {
-          console.warn("WebRTC unavailable:", e);
-        }
         state(ws);
         if (latestDetection)
           ws.send(JSON.stringify({ type: "detections", ...latestDetection }));
@@ -788,7 +823,7 @@ export async function main(): Promise<void> {
         try {
           route(ws, String(m));
         } catch (e) {
-          ws.send(JSON.stringify({ type: "error", error: String(e) }));
+          ws.send(JSON.stringify({ type: "error", error: e instanceof Error ? e.message : String(e) }));
         }
       },
       close(ws) {

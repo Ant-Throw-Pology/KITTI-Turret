@@ -15,17 +15,17 @@ try {
   lock.acquire();
   await model.open();
   const loadedMs = performance.now() - started;
-  let output: Uint16Array<ArrayBufferLike> = new Uint16Array();
+  let output: Float32Array<ArrayBufferLike>[] = [];
   const timings: number[] = [];
   for (let index = 0; index < runs; index++) {
     const inferenceStarted = performance.now();
     output = await model.infer(input);
     timings.push(performance.now() - inferenceStarted);
   }
+  const outputElements = output.reduce((sum, o) => sum + o.length, 0);
   console.log(JSON.stringify({
     model: modelPath,
-    outputElements: output.length,
-    outputBytes: output.byteLength,
+    outputElements,
     loadMs: Math.round(loadedMs * 10) / 10,
     runs,
     averageInferenceMs: Math.round(timings.reduce((sum, value) => sum + value, 0) / timings.length * 10) / 10,

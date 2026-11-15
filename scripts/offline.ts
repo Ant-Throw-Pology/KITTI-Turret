@@ -17,7 +17,7 @@
 
 import { JpegEncoder, jpegQualityToQ } from "../src/encoder";
 import { letterbox } from "../src/preprocess";
-import { decodeFp16 } from "../src/yolo";
+import { decodeDetect6 } from "../src/yolo";
 import { TagHelper } from "../src/apriltag";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -138,7 +138,7 @@ async function* frameGenerator(file: string, mode: "image" | "video", width: num
 const args = parseArgs(process.argv.slice(2));
 
 // Conditionally load RKNN – only when --model is given.
-type Model = { infer(rgb: Uint8Array): Promise<Uint16Array<ArrayBufferLike>>; close(): void };
+type Model = { infer(rgb: Uint8Array): Promise<Float32Array<ArrayBufferLike>[]>; close(): void };
 let model: Model | undefined;
 if (args.model) {
   const { RknnModel, NpuLock } = await import("../src/rknn");
@@ -172,7 +172,7 @@ try {
       tags.submit(sequence, bgr, args.width, args.height);
       const letterboxed = letterbox(bgr, args.width, args.height);
       const raw = await model.infer(letterboxed.rgb);
-      boxes = [...decodeFp16(raw, letterboxed, args.classes), ...tags.latest()];
+      boxes = [...decodeDetect6(raw, letterboxed, args.classes), ...tags.latest()];
     }
 
     // Encode to JPEG

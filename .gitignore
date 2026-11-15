@@ -1,6 +1,9 @@
 # Backboard agent data
 .backboard
 
+# RKNN model artifacts (large binaries, provisioned on target)
+yolo26n_rknn_model/
+
 # dependencies (bun install)
 node_modules
 

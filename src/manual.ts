@@ -24,7 +24,7 @@ export class Manual {
   if(id!==this.generation[axis]||!this.enabled||this.estopped)throw new Error('Motor disabled');
   const motor=this.axes[axis];
   const effectiveDir = this.invert[axis] ? (dir * -1) as 1 | -1 : dir;
-  const base=axis==='yaw'?1920:1280;
+  const base=axis==='yaw'?7680:5120;
   const pct=overridePct??this.speedPct;
   const rate=base*pct/100*(slow?.25:1);
   const task=(async()=>{

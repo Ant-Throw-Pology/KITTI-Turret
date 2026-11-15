@@ -74,7 +74,7 @@ test("Camera stop kills ffmpeg child directly, not the process group", async () 
   // start() calls open() which sets this.proc then throws on null stdout;
   // start()'s after-catch block calls stop() which should use direct child kill
   expect(killMock).toHaveBeenCalled();
-  expect(killMock).toHaveBeenCalledWith("SIGTERM");
+  expect(killMock).toHaveBeenCalledWith("SIGKILL");
 
   spawnSpy.mockRestore();
 });

@@ -7,7 +7,7 @@
     "start": "cd dist && bun index.js",
     "typecheck": "bun check",
     "test": "bun test",
-    "build": "rm -rf dist && bun build src/index.ts src/worker.ts --target=bun --production --outdir dist --external node-datachannel",
+    "build": "rm -rf dist && bun build src/index.ts src/worker.ts --sourcemap=linked --target=bun --production --outdir dist --external node-datachannel",
     "dev:deploy": "./deploy/dev-deploy.sh"
   },
   "dependencies": {

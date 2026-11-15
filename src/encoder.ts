@@ -122,6 +122,39 @@ function defaultSpawn(command: string[]): EncoderProcess {
   return proc as unknown as EncoderProcess;
 }
 
+/** Per-frame JPEG encoder. Spawns one ffmpeg per frame and closes its stdin
+ *  after the single BGR image, which reliably flushes the output on targets
+ *  where a long-lived piped encoder stalls (Bun pipe-stdin quirk). */
+export class PerFrameJpegEncoder {
+  private readonly frameBytes: number;
+  private readonly command: string[];
+  private closed = false;
+  constructor(private readonly options: JpegEncoderOptions) {
+    const { width, height, quality } = options;
+    this.frameBytes = width * height * 3;
+    this.command = [
+      options.ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error",
+      "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", `${width}x${height}`, "-i", "pipe:0",
+      "-frames:v", "1", "-q:v", String(jpegQualityToQ(quality)), "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ];
+  }
+  start(): void { if (this.closed) throw new Error("JPEG encoder is stopped"); }
+  async encode(bgr: Uint8Array): Promise<Uint8Array> {
+    if (this.closed) throw new Error("JPEG encoder is stopped");
+    if (bgr.byteLength !== this.frameBytes) throw new Error(`JPEG encoder expected ${this.frameBytes} BGR bytes, got ${bgr.byteLength}`);
+    const proc = Bun.spawn(this.command, { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+    if (!proc.stdin || typeof proc.stdin === "number") throw new Error("JPEG encoder stdin unavailable");
+    proc.stdin.write(bgr);
+    try { await proc.stdin.end(); } catch { /* already ended */ }
+    const bytes = new Uint8Array(await new Response(proc.stdout as ReadableStream).arrayBuffer());
+    await proc.exited;
+    const frames = new JpegStreamParser().push(bytes);
+    if (!frames.length) throw new Error("encoder produced no JPEG");
+    return frames[0]!;
+  }
+  async stop(): Promise<void> { this.closed = true; }
+}
+
 export class JpegEncoder {
   private readonly parser: JpegStreamParser;
   private readonly frameBytes: number;
@@ -172,13 +205,23 @@ export class JpegEncoder {
       this.pending = pending;
       try {
         const written = this.proc!.stdin.write(bgr);
+        const flush = () => {
+          try {
+            const flushed = this.proc?.stdin.flush?.();
+            if (flushed instanceof Promise) void flushed.catch(error => { if (this.pending === pending) this.fail(error); });
+          } catch (error) {
+            if (this.pending === pending) this.fail(error);
+          }
+        };
         if (written instanceof Promise) {
           void written.then(
-            count => { if (this.pending === pending && count !== bgr.byteLength) this.fail(new Error("JPEG encoder short input write")); },
+            count => { if (this.pending === pending && count !== bgr.byteLength) this.fail(new Error("JPEG encoder short input write")); else flush(); },
             error => { if (this.pending === pending) this.fail(error); },
           );
         } else if (written !== bgr.byteLength) {
           this.fail(new Error("JPEG encoder short input write"));
+        } else {
+          flush();
         }
       } catch (error) {
         if (this.pending === pending) this.fail(error);

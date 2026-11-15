@@ -40,3 +40,41 @@ export function decodeFp16(output: Uint16Array, meta: LetterboxResult, classIds:
   }
   return nms(boxes, nmsIou);
 }
+
+/** Decodes the 6-output YOLO26 RKNN export: for each stride (8,16,32) a box
+ *  tensor [1,4,H,W] of left/top/right/bottom distances and a class tensor
+ *  [1,80,H,W] of RAW class logits (the exported head has no in-graph sigmoid,
+ *  so scores must be sigmoid-activated before thresholding). Outputs are
+ *  float32 (the runtime dequantizes when want_float=1). */
+export function decodeDetect6(outputs: Float32Array[], meta: LetterboxResult, classIds: ReadonlySet<number>, confidence = 0.4, nmsIou = 0.45, labels?: readonly string[]): Detection[] {
+  if (outputs.length !== 6) throw new Error(`expected 6 outputs, got ${outputs.length}`);
+  const scales: Array<[number, number, number, number]> = [
+    [8, 80, 80, 0], [16, 40, 40, 2], [32, 20, 20, 4],
+  ];
+  const boxes: Detection[] = [];
+  for (const [stride, w, h, base] of scales) {
+    const box = outputs[base]!, cls = outputs[base + 1]!;
+    const area = w * h;
+    if (box.length < 4 * area || cls.length < 80 * area) continue;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const cell = y * w + x;
+        let best = -1, score = confidence;
+        for (const id of classIds) {
+          if (!Number.isInteger(id) || id < 0 || id >= 80) continue;
+          const p = 1 / (1 + Math.exp(-cls[id * area + cell]!));
+          if (p > score) { score = p; best = id; }
+        }
+        if (best < 0) continue;
+        const l = box[0 * area + cell]!, t = box[1 * area + cell]!, r = box[2 * area + cell]!, b = box[3 * area + cell]!;
+        const cx = (x + 0.5) * stride, cy = (y + 0.5) * stride;
+        const x0 = Math.max(0, Math.min(meta.sourceWidth, (cx - l * stride - meta.padX) / meta.scale));
+        const y0 = Math.max(0, Math.min(meta.sourceHeight, (cy - t * stride - meta.padY) / meta.scale));
+        const x1 = Math.max(0, Math.min(meta.sourceWidth, (cx + r * stride - meta.padX) / meta.scale));
+        const y1 = Math.max(0, Math.min(meta.sourceHeight, (cy + b * stride - meta.padY) / meta.scale));
+        if (x1 > x0 && y1 > y0) boxes.push({ label: labels?.[best] ?? String(best), classId: best, confidence: score, x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+      }
+    }
+  }
+  return nms(boxes, nmsIou);
+}
