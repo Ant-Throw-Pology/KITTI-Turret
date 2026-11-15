@@ -531,7 +531,7 @@ export async function main(): Promise<void> {
           void peer
             .signal(m)
             .catch((e: unknown) =>
-              ws.send(JSON.stringify({ type: "error", error: String(e) })),
+              ws.send(JSON.stringify({ type: "error", error: e instanceof Error ? e.message : String(e) })),
             );
         }
         break;
@@ -562,8 +562,8 @@ export async function main(): Promise<void> {
         });
         break;
       case "motor":
+        if (!manual) throw new Error("hardware unavailable");
         if (
-          !manual ||
           !["yaw", "pitch"].includes(m.axis) ||
           ![-1, 1].includes(m.dir) ||
           typeof m.on !== "boolean"
@@ -577,7 +577,7 @@ export async function main(): Promise<void> {
               enabled: manual.enabled,
               moving: false,
               speed: manual.speedPct,
-              error: String(e),
+              error: e instanceof Error ? e.message : String(e),
             }),
           );
         else manual.stop(m.axis);
@@ -788,7 +788,7 @@ export async function main(): Promise<void> {
         try {
           route(ws, String(m));
         } catch (e) {
-          ws.send(JSON.stringify({ type: "error", error: String(e) }));
+          ws.send(JSON.stringify({ type: "error", error: e instanceof Error ? e.message : String(e) }));
         }
       },
       close(ws) {
