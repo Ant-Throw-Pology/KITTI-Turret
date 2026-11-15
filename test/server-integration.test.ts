@@ -472,3 +472,60 @@ test('control-link watchdog closes silent client after PING_TIMEOUT_MS and trigg
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test('Origin validation rejects cross-origin requests on /ws and /estop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kitti-origin-'));
+  const socketPath = join(dir, 'turret.sock');
+  const port = await freePort();
+  const env = {
+    ...process.env,
+    KITTI_MOCK: '1',
+    KITTI_HOST: '127.0.0.1',
+    KITTI_PORT: String(port),
+    KITTI_SOCKET: socketPath,
+    KITTI_EXTERNAL_WORKER: '1',
+    KITTI_MODEL: '',
+  };
+  const server = Bun.spawn([process.execPath, join(root, 'dist', 'index.js')], {
+    cwd: join(root, 'dist'), env, stdout: 'pipe', stderr: 'pipe',
+  });
+  try {
+    let url = '';
+    const reader = server.stdout.getReader();
+    const decoder = new TextDecoder();
+    let output = '';
+    while (!url) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`server exited: ${output}`);
+      output += decoder.decode(value, { stream: true });
+      const match = /KITTI (http:\/\/\S+)/.exec(output);
+      if (match) url = match[1]!;
+    }
+    reader.releaseLock();
+
+    // /estop with no Origin (non-browser loopback) — allowed
+    let res = await fetch(new URL('/estop', url), { method: 'POST' });
+    expect(res.status).toBe(200);
+
+    // /estop with loopback-origin header — allowed
+    res = await fetch(new URL('/estop', url), { method: 'POST', headers: { Origin: 'http://127.0.0.1' } });
+    expect(res.status).toBe(200);
+
+    // /estop with cross-origin — rejected
+    res = await fetch(new URL('/estop', url), { method: 'POST', headers: { Origin: 'http://evil.com' } });
+    expect(res.status).toBe(403);
+
+    // /ws with cross-origin — rejected
+    res = await fetch(new URL('/ws', url), { headers: { Origin: 'http://evil.com' } });
+    expect(res.status).toBe(403);
+
+    // /ws with no Origin (non-browser loopback) — upgrade proceeds
+    res = await fetch(new URL('/ws', url));
+    expect(res.status).toBe(400); // 400 = no WebSocket key, not 403
+  } finally {
+    server.kill('SIGTERM');
+    const exited = await Promise.race([server.exited, Bun.sleep(4_000).then(() => -1)]);
+    if (exited === -1) server.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20_000);
